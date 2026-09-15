@@ -5,19 +5,66 @@ This module provides methods for processing meteorological data.
 from __future__ import annotations
 
 import warnings
+from typing import TypeVar, Callable, Protocol, cast
 
 import numpy as np
 import pandas as pd
+import numpy.typing as npt
 import scipy.constants as const
 
-from openoa.utils._converters import df_to_series, series_method
+from openoa.utils._converters import df_to_series
+from openoa.utils._converters import series_method as _untyped_series_method
 
 # Define constants used in some of the methods
 R = 287.058  # Gas constant for dry air, units of J/kg/K
 Rw = 461.5  # Gas constant of water vapour, unit J/kg/K
 
+NDArrayFloat = npt.NDArray[np.float64]
+F = TypeVar("F", bound=Callable[..., object])
 
-def wrap_180(x: float | np.ndarray | pd.Series | pd.DataFrame):
+
+class _SeriesMethod(Protocol):
+    def __call__(self, data_cols: list[str]) -> Callable[[F], F]:
+        """Decorates a function so that its ``data_cols`` may be passed as column names."""
+
+
+# ``series_method`` lives in the not-yet-annotated ``_converters`` module; it only swaps column-name
+# arguments for ``Series`` at runtime, so the decorated function keeps its own signature.
+series_method = cast(_SeriesMethod, _untyped_series_method)
+
+
+def _as_series(*args: pd.Series | str) -> tuple[pd.Series, ...]:
+    """Narrows the ``Series | str`` inputs of a ``series_method`` to ``Series``; any remaining column
+    name means no ``data`` was provided for the conversion."""
+    for arg in args:
+        if isinstance(arg, str):
+            raise TypeError(f"Column name '{arg}' was provided without a `data` DataFrame.")
+    return tuple(cast(pd.Series, arg) for arg in args)
+
+
+def _as_arrays(
+    *args: pd.Series | NDArrayFloat | str,
+) -> tuple[pd.Series | NDArrayFloat, ...]:
+    """Narrows the ``Series | ndarray | str`` inputs of a ``series_method`` to array-like values."""
+    for arg in args:
+        if isinstance(arg, str):
+            raise TypeError(f"Column name '{arg}' was provided without a `data` DataFrame.")
+    return tuple(cast("pd.Series | NDArrayFloat", arg) for arg in args)
+
+
+def _as_column_names(*args: pd.Series | str | None) -> tuple[str, ...]:
+    """Narrows the inputs of a ``series_method`` to column names when ``data`` is provided."""
+    for arg in args:
+        if isinstance(arg, pd.Series):
+            raise TypeError(
+                "When `data` is passed, all data column arguments must be the name of the column "
+                "in `data`, and not a pandas Series."
+            )
+    # ``None`` is passed through so that ``df_to_series`` returns ``None`` for optional columns.
+    return tuple(cast(str, arg) for arg in args)
+
+
+def wrap_180(x: float | NDArrayFloat | pd.Series | pd.DataFrame) -> float | NDArrayFloat:
     """
     Converts an angle, an array of angles, or a pandas Series or DataFrame of angles in degrees to
     the range -180 to +180 degrees.
@@ -28,19 +75,21 @@ def wrap_180(x: float | np.ndarray | pd.Series | pd.DataFrame):
         float | np.ndarray: The input angle(s) converted to the range -180 to +180 degrees, returned
             as a float or numpy array (degrees)
     """
-    input_type = type(x)
-    if (input_type == pd.core.series.Series) | (input_type == pd.core.frame.DataFrame):
-        x = x.values
+    values: NDArrayFloat = np.asarray(
+        x.to_numpy() if isinstance(x, (pd.Series, pd.DataFrame)) else x
+    )
 
-    input_size = np.size(x)
+    input_size = np.size(values)
 
-    x = x % 360.0
-    x = np.where(x > 180.0, x - 360.0, x)
+    values = values % 360.0
+    values = np.where(values > 180.0, values - 360.0, values)
 
-    return x if input_size > 1 else float(x)
+    return values if input_size > 1 else float(values)
 
 
-def circular_mean(x: pd.DataFrame | pd.Series | np.ndarray, axis: int = 0):
+def circular_mean(
+    x: pd.DataFrame | pd.Series | NDArrayFloat, axis: int = 0
+) -> pd.Series | float | NDArrayFloat:
     """
     Compute circular mean of wind direction data for a pandas Series or 1-dimensional numpy array,
     or along any dimension of a multi-dimensional pandas DataFrame or numpy array
@@ -58,7 +107,7 @@ def circular_mean(x: pd.DataFrame | pd.Series | np.ndarray, axis: int = 0):
     if axis >= x.ndim:
         raise ValueError("The axis argument cannot be greater than the dimension of the data (x).")
 
-    return (
+    result: pd.Series | float | NDArrayFloat = (
         np.degrees(
             np.arctan2(
                 np.sin(np.radians(x)).mean(axis=axis),
@@ -67,12 +116,15 @@ def circular_mean(x: pd.DataFrame | pd.Series | np.ndarray, axis: int = 0):
         )
         % 360.0
     )
+    return result
 
 
 @series_method(data_cols=["u", "v"])
 def compute_wind_speed(
-    u: pd.Series | np.ndarray | str, v: pd.Series | np.ndarray | str, data: pd.DataFrame = None
-) -> pd.Series | np.ndarray:
+    u: pd.Series | NDArrayFloat | str,
+    v: pd.Series | NDArrayFloat | str,
+    data: pd.DataFrame | None = None,
+) -> pd.Series | NDArrayFloat:
     """Compute the wind speed from the u and v components.
 
     Note:
@@ -94,12 +146,14 @@ def compute_wind_speed(
     Returns:
         :obj:`pandas.Series` | :obj:`numpy.ndarray`: wind speed, in m/s.
     """
-    return np.sqrt(u**2 + v**2)
+    u, v = _as_arrays(u, v)
+    result: pd.Series | NDArrayFloat = np.sqrt(u**2 + v**2)
+    return result
 
 
 @series_method(data_cols=["u", "v"])
 def compute_wind_direction(
-    u: pd.Series | str, v: pd.Series | str, data: pd.DataFrame = None
+    u: pd.Series | str, v: pd.Series | str, data: pd.DataFrame | None = None
 ) -> pd.Series:
     """Compute wind direction given u and v wind vector components
 
@@ -113,14 +167,15 @@ def compute_wind_direction(
     Returns:
         :obj:`pandas.Series`: wind direction; units of degrees
     """
+    u, v = _as_series(u, v)
     wd = 180 + np.arctan2(u, v) * 180 / np.pi  # Calculate wind direction in degrees
     return pd.Series(np.where(wd != 360, wd, 0))
 
 
 @series_method(data_cols=["wind_speed", "wind_dir"])
 def compute_u_v_components(
-    wind_speed: pd.Series | str, wind_dir: pd.Series | str, data: pd.DataFrame = None
-) -> pd.Series:
+    wind_speed: pd.Series | str, wind_dir: pd.Series | str, data: pd.DataFrame | None = None
+) -> tuple[pd.Series, pd.Series]:
     """Compute vector components of the horizontal wind given wind speed and direction
 
     Args:
@@ -139,13 +194,14 @@ def compute_u_v_components(
             u(pandas.Series): the zonal component of the wind; units of m/s.
             v(pandas.Series): the meridional component of the wind; units of m/s
     """
+    wind_speed, wind_dir = _as_series(wind_speed, wind_dir)
     if np.any(wind_speed < 0):
         raise ValueError("Negative values exist in the `wind_speed` data.")
     if np.any(wind_dir < 0):
         raise ValueError("Negative values exist in the `wind_dir` data.")
 
-    u = np.round(-wind_speed * np.sin(wind_dir * np.pi / 180), 10)
-    v = np.round(-wind_speed * np.cos(wind_dir * np.pi / 180), 10)
+    u: pd.Series = np.round(-wind_speed * np.sin(wind_dir * np.pi / 180), 10)
+    v: pd.Series = np.round(-wind_speed * np.cos(wind_dir * np.pi / 180), 10)
 
     return u, v
 
@@ -154,9 +210,9 @@ def compute_u_v_components(
 def compute_air_density(
     temp_col: pd.Series | str,
     pres_col: pd.Series | str,
-    humi_col: pd.Series | str = None,
-    data: pd.DataFrame = None,
-):
+    humi_col: pd.Series | str | None = None,
+    data: pd.DataFrame | None = None,
+) -> pd.Series:
     """
     Calculate air density from the ideal gas law based on the definition provided by IEC 61400-12
     given pressure, temperature and relative humidity.
@@ -184,9 +240,16 @@ def compute_air_density(
         :obj:`pandas.Series`: Rho, calcualted air density; units of kg/m3
     """
     if data is not None:
-        temp_col, pres_col, humi_col = df_to_series(data, temp_col, pres_col, humi_col)
+        temp_col, pres_col, humi_col = df_to_series(
+            data, *_as_column_names(temp_col, pres_col, humi_col)
+        )
+    temp_col, pres_col = _as_series(temp_col, pres_col)
     # Check if humidity column is provided and create default humidity array with values of 0.5 if necessary
-    rel_humidity = humi_col if humi_col is not None else np.full(temp_col.shape[0], 0.5)
+    rel_humidity: pd.Series | NDArrayFloat
+    if humi_col is None:
+        rel_humidity = np.full(temp_col.shape[0], 0.5)
+    else:
+        (rel_humidity,) = _as_series(humi_col)
 
     if np.any(temp_col < 0):
         raise ValueError("Negative values exist in the temperature data.")
@@ -195,7 +258,7 @@ def compute_air_density(
     if np.any(rel_humidity < 0):
         raise ValueError("Negative values exist in the humidity data.")
 
-    rho = (1 / temp_col) * (
+    rho: pd.Series = (1 / temp_col) * (
         pres_col / R - rel_humidity * (0.0000205 * np.exp(0.0631846 * temp_col)) * (1 / R - 1 / Rw)
     )
 
@@ -208,7 +271,7 @@ def pressure_vertical_extrapolation(
     temp_avg: pd.Series | str,
     z0: pd.Series | str,
     z1: pd.Series | str,
-    data: pd.DataFrame = None,
+    data: pd.DataFrame | None = None,
 ) -> pd.Series:
     """
     Extrapolate pressure from height z0 to height z1 given the average temperature in the layer.
@@ -232,17 +295,19 @@ def pressure_vertical_extrapolation(
     Returns:
         :obj:`pandas.Series`: :py:attr:`p1`, extrapolated pressure at :py:attr:`z1`, in Pascals
     """
+    p0, temp_avg, z0, z1 = _as_series(p0, temp_avg, z0, z1)
     if np.any(p0 < 0):
         raise ValueError("Negative values exist in the `p0` data.")
     if np.any(temp_avg < 0):
         raise ValueError("Negative values exist in the `temp_avg` data.")
 
-    return p0 * np.exp(-const.g * (z1 - z0) / R / temp_avg)  # Pressure at z1
+    p1: pd.Series = p0 * np.exp(-const.g * (z1 - z0) / R / temp_avg)  # Pressure at z1
+    return p1
 
 
 @series_method(data_cols=["wind_col", "density_col"])
 def air_density_adjusted_wind_speed(
-    wind_col: pd.Series | str, density_col: pd.Series | str, data: pd.DataFrame = None
+    wind_col: pd.Series | str, density_col: pd.Series | str, data: pd.DataFrame | None = None
 ) -> pd.Series:
     """
     Apply air density correction to wind speed measurements following IEC-61400-12-1 standard
@@ -258,12 +323,14 @@ def air_density_adjusted_wind_speed(
     Returns:
         :obj:`pandas.Series`: density-adjusted wind speeds, in m/s
     """
-    return wind_col * np.power(density_col / density_col.mean(), 1.0 / 3)
+    wind_col, density_col = _as_series(wind_col, density_col)
+    adjusted: pd.Series = wind_col * np.power(density_col / density_col.mean(), 1.0 / 3)
+    return adjusted
 
 
 @series_method(data_cols=["mean_col", "std_col"])
 def compute_turbulence_intensity(
-    mean_col: pd.Series | str, std_col: pd.Series | str, data: pd.DataFrame = None
+    mean_col: pd.Series | str, std_col: pd.Series | str, data: pd.DataFrame | None = None
 ) -> pd.Series:
     """
     Compute turbulence intensity
@@ -280,7 +347,8 @@ def compute_turbulence_intensity(
         :obj:`pd.Series`: turbulence intensity, (unitless ratio)
     """
     if data is not None:
-        mean_col, std_col = df_to_series(data, mean_col, std_col)
+        mean_col, std_col = df_to_series(data, *_as_column_names(mean_col, std_col))
+    mean_col, std_col = _as_series(mean_col, std_col)
     return std_col / mean_col
 
 
@@ -310,10 +378,10 @@ def compute_shear(
 
     # Extract the wind speed columns from `data` and create "u" 2-D array; where element
     # [i,j] is the wind speed measurement at the ith timestep and jth sensor height
-    u: np.ndarray = np.column_stack(df_to_series(data, *ws_heights))
+    u: NDArrayFloat = np.column_stack(df_to_series(data, *ws_heights))
 
     # create "z" 2_D array; columns are filled with the sensor height
-    z: np.ndarray = np.repeat([[*ws_heights.values()]], len(data), axis=0)
+    z: NDArrayFloat = np.repeat([[*ws_heights.values()]], len(data), axis=0)
 
     # take log of z & u
     with warnings.catch_warnings():  # suppress log division by zero warning.
@@ -336,28 +404,32 @@ def compute_shear(
     z[np.isnan(z)] = 0
 
     # compute shear based on simple linear regression
-    alpha = (z * u).sum(axis=1) / (z * z).sum(axis=1)
+    alpha = pd.Series((z * u).sum(axis=1) / (z * z).sum(axis=1))
 
     if not return_reference_values:
         return alpha
 
     else:
         # compute reference height
-        z_ref: float = np.exp(np.mean(np.log(np.array(list(ws_heights.values())))))
+        z_ref = float(np.exp(np.mean(np.log(np.array(list(ws_heights.values()))))))
 
         # replace zeros in u (if any) with NaN
         u[u == 0] = np.nan
 
         # compute reference wind speed
-        u_ref = np.exp(np.nanmean(u, axis=1))
+        u_ref = pd.Series(np.exp(np.nanmean(u, axis=1)))
 
         return alpha, z_ref, u_ref
 
 
 @series_method(data_cols=["v1", "shear"])
 def extrapolate_windspeed(
-    v1: pd.Series | str, z1: float, z2: float, shear: pd.Series | str, data: pd.DataFrame = None
-):
+    v1: pd.Series | str,
+    z1: float,
+    z2: float,
+    shear: pd.Series | str,
+    data: pd.DataFrame | None = None,
+) -> pd.Series:
     """
     Extrapolates wind speed vertically using the Power Law.
 
@@ -373,7 +445,9 @@ def extrapolate_windspeed(
     Returns:
         :obj: (`pandas.Series` | `numpy.array` | `float`): Wind speed extrapolated to target height.
     """
-    return v1 * (z2 / z1) ** shear
+    v1, shear = _as_series(v1, shear)
+    v2: pd.Series = v1 * (z2 / z1) ** shear
+    return v2
 
 
 @series_method(data_cols=["wind_a", "wind_b"])
@@ -382,8 +456,8 @@ def compute_veer(
     height_a: float,
     wind_b: pd.Series | str,
     height_b: float,
-    data: pd.DataFrame = None,
-):
+    data: pd.DataFrame | None = None,
+) -> pd.Series:
     """
     Compute veer between wind direction measurements
 
@@ -400,6 +474,7 @@ def compute_veer(
     Returns:
         veer(:obj:`array`): veer (deg/m)
     """
+    wind_a, wind_b = _as_series(wind_a, wind_b)
     # Calculate wind direction change
     delta_dir = wind_b - wind_a
 

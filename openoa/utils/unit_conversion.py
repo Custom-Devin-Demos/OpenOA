@@ -4,15 +4,32 @@ This module provides basic methods for unit conversion and calculation of basic 
 
 from __future__ import annotations
 
+from typing import Any, TypeVar, Callable, cast
+
 import numpy as np
 import pandas as pd
 
 from openoa.utils._converters import series_method
 
+_F = TypeVar("_F", bound=Callable[..., Any])
 
-@series_method(data_cols=["power_col"])
+
+def _series_method(data_cols: list[str]) -> Callable[[_F], _F]:
+    """Signature-preserving view of :py:func:`openoa.utils._converters.series_method`, which is
+    not yet typed; the wrapper is a pass-through to the decorated function's arguments."""
+    return cast("Callable[[_F], _F]", series_method(data_cols=data_cols))
+
+
+def _as_series(col: pd.Series | str) -> pd.Series:
+    """Narrows a ``series_method`` argument to the pandas ``Series`` the wrapper guarantees."""
+    if isinstance(col, str):
+        raise TypeError(f"Column name '{col}' was provided without the `data` argument.")
+    return col
+
+
+@_series_method(data_cols=["power_col"])
 def convert_power_to_energy(
-    power_col: str | pd.Series, sample_rate_min="10min", data: pd.DataFrame = None
+    power_col: str | pd.Series, sample_rate_min: str = "10min", data: pd.DataFrame | None = None
 ) -> pd.Series:
     """
     Compute energy [kWh] from power [kw] and return the data column
@@ -34,18 +51,18 @@ def convert_power_to_energy(
     hours = _diff.days * 24 + _diff.seconds / 60 / 60
 
     # Convert the power, in kW, to energy, in kWh
-    return power_col * hours
+    return _as_series(power_col) * hours
 
 
-@series_method(data_cols=["net_energy", "availability", "curtailment"])
+@_series_method(data_cols=["net_energy", "availability", "curtailment"])
 def compute_gross_energy(
     net_energy: str | pd.Series,
     availability: str | pd.Series,
     curtailment: str | pd.Series,
     availability_type: str = "frac",
     curtailment_type: str = "frac",
-    data: str | pd.DataFrame = None,
-):
+    data: pd.DataFrame | None = None,
+) -> pd.Series:
     """
     Computes gross energy for a wind plant or turbine by adding reported :py:attr:`availability` and
     :py:attr:`curtailment` losses to reported net energy.
@@ -69,11 +86,15 @@ def compute_gross_energy(
     Returns:
         gross(:obj:`pandas.Series`): Calculated gross energy for wind plant or turbine
     """
+    net_energy = _as_series(net_energy)
+    availability = _as_series(availability)
+    curtailment = _as_series(curtailment)
     if np.any(availability < 0) | np.any(curtailment < 0):
         raise ValueError(
             "Cannot have negative availability or curtailment input values. Check your data"
         )
 
+    gross: pd.Series
     if (availability_type == "frac") & (curtailment_type == "frac"):
         gross = net_energy / (1 - availability - curtailment)
     elif (availability_type == "frac") & (curtailment_type == "energy"):
@@ -89,8 +110,8 @@ def compute_gross_energy(
     return gross
 
 
-@series_method(data_cols=["variable"])
-def convert_feet_to_meter(variable: str | pd.Series, data: pd.DataFrame = None):
+@_series_method(data_cols=["variable"])
+def convert_feet_to_meter(variable: str | pd.Series, data: pd.DataFrame | None = None) -> pd.Series:
     """
     Compute variable in [meter] from [feet] and return the data column
 
@@ -103,4 +124,4 @@ def convert_feet_to_meter(variable: str | pd.Series, data: pd.DataFrame = None):
     Returns:
         :obj:`pandas.Series`: :py:attr:`variable` in meters
     """
-    return variable * 0.3048
+    return _as_series(variable) * 0.3048

@@ -1,0 +1,19 @@
+# Monte Carlo AEP analysis of the La Haute Borne example plant, mirroring the parameters of
+# examples/02a_plant_aep_analysis.ipynb with a small number of simulations.
+#
+#   python -m openoa.cli run aep --config examples/configs/aep.yaml --output-dir /tmp/openoa_aep
+seed: 42
+plant:
+  loader: examples.project_ENGIE:prepare
+  loader_kwargs:
+    path: ../data/la_haute_borne
+    use_cleansed: false
+analysis:
+  reanalysis_products: [merra2, era5]
+  time_resolution: MS
+  reg_temperature: true
+  reg_wind_direction: true
+  reg_model: lin
+  run:
+    num_sim: 20
+    progress_bar: false

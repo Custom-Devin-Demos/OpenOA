@@ -61,6 +61,9 @@ classifiers = [  # https://pypi.org/classifiers/
     "Typing :: Typed",
 ]
 
+[project.scripts]
+openoa = "openoa.cli:main"
+
 [project.urls]
 source = "https://github.com/NREL/OpenOA"
 documentation = "https://openoa.readthedocs.io/"
@@ -76,6 +79,12 @@ develop = [
   "flake8-docstrings",
   "pytest>=9",
   "pytest-cov>=2.8.1",
+  "mypy>=1.14",
+  "pandas-stubs>=2.2,<3",
+  "types-PyYAML",
+  "types-pytz",
+  "types-requests",
+  "types-tabulate",
 ]
 docs = [
   "Sphinx>=5.0,!=7.2.0",
@@ -138,6 +147,69 @@ filterwarnings = [
   "ignore::DeprecationWarning:patsy.*:",
   "ignore::DeprecationWarning:pygam.*:",
 ]
+
+[tool.mypy]
+# `mypy --strict` is enforced file-by-file: every module listed in `files` must be clean, and
+# imports into modules not yet listed are followed silently so that the two sets can diverge
+# while the package is being annotated. Add a module to `files` once it passes.
+strict = true
+follow_imports = "silent"
+warn_unreachable = true
+show_error_codes = true
+pretty = false
+files = [
+  "openoa/__init__.py",
+  "openoa/logging.py",
+  "openoa/cli.py",
+  "openoa/runners/__init__.py",
+  "openoa/schema/__init__.py",
+  "openoa/schema/schema.py",
+  "openoa/analysis/__init__.py",
+  "openoa/analysis/_analysis_validators.py",
+  "openoa/analysis/wake_losses.py",
+  "openoa/utils/met_data_processing.py",
+  "openoa/runners/wake_losses.py",
+  "openoa/analysis/eya_gap_analysis.py",
+  "openoa/plant.py",
+  "openoa/schema/metadata.py",
+  "openoa/runners/eya_gap_analysis.py",
+  "openoa/analysis/aep.py",
+  "openoa/utils/timeseries.py",
+  "openoa/utils/unit_conversion.py",
+  "openoa/utils/machine_learning_setup.py",
+  "openoa/runners/aep.py",
+  "openoa/analysis/electrical_losses.py",
+  "openoa/utils/plot.py",
+  "openoa/runners/electrical_losses.py",
+  "openoa/analysis/yaw_misalignment.py",
+  "openoa/utils/filters.py",
+  "openoa/runners/yaw_misalignment.py",
+  "openoa/analysis/turbine_long_term_gross_energy.py",
+  "openoa/runners/turbine_long_term_gross_energy.py",
+  "openoa/utils/imputing.py",
+  "openoa/utils/power_curve/__init__.py",
+  "openoa/utils/power_curve/functions.py",
+  "openoa/utils/power_curve/parametric_forms.py",
+  "openoa/utils/power_curve/parametric_optimize.py",
+]
+
+[[tool.mypy.overrides]]
+# Third-party scientific libraries without type stubs.
+module = [
+  "cdsapi.*",
+  "eia.*",
+  "entr.*",
+  "h5pyd.*",
+  "pygam.*",
+  "scipy.*",
+  "shapely.*",
+  "sklearn.*",
+  "statsmodels.*",
+  "tqdm.*",
+  "xarray.*",
+  "dateutil.*",
+]
+ignore_missing_imports = true
 
 [tool.black]
 # https://github.com/psf/black

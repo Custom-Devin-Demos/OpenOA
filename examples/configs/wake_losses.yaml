@@ -1,0 +1,24 @@
+# Headless wake losses analysis of the La Haute Borne example plant, mirroring
+# examples/06_wake_loss_analysis.ipynb. Run from the repository root with:
+#
+#   python -m openoa.cli run wake_losses --config examples/configs/wake_losses.yaml --output-dir /tmp/openoa_wake_losses
+#
+# Relative paths are resolved against this file's directory.
+seed: 42
+plant:
+  loader: examples.project_ENGIE:prepare
+  loader_kwargs:
+    path: ../data/la_haute_borne
+analysis:
+  wind_direction_col: WMET_HorWdDir
+  wind_direction_data_type: scada       # appends analysis_type "WakeLosses-scada"
+  wind_direction_asset_ids: [R80711, R80721, R80736]
+  wind_direction_offset: 15.85          # northing calibration: (WMET_HorWdDir + 15.85) % 360
+  end_date: "2015-11-25 00:00"
+  UQ: false
+  num_sim: 5                            # only used when UQ: true
+  run:
+    no_wakes_ws_thresh_LT_corr: 15.0
+    num_years_LT: 20
+    freestream_sector_width: 90.0
+    wind_bin_mad_thresh: 7.0

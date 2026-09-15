@@ -54,6 +54,7 @@ import pandas as pd
 import sklearn
 from attrs import field, define
 from pygam import GAM
+from numpy.typing import NDArray
 from sklearn.metrics import r2_score, make_scorer
 from sklearn.ensemble import ExtraTreesRegressor, GradientBoostingRegressor
 from sklearn.model_selection import KFold, RandomizedSearchCV
@@ -86,6 +87,13 @@ def _algorithm_map(
     )
 
 
+def _algorithm_converter(
+    abbreviation: str,
+) -> GAM | ExtraTreesRegressor | GradientBoostingRegressor:
+    """Case-insensitive version of :py:func:`_algorithm_map`."""
+    return _algorithm_map(abbreviation.lower())
+
+
 @define(auto_attribs=True)
 class MachineLearningSetup:
     """ML setup and method routinization class. The primary purpose for this class is for
@@ -100,17 +108,19 @@ class MachineLearningSetup:
             :py:attr:`algorithm`.
     """
 
-    algorithm: str = field(converter=(str.lower, _algorithm_map))
-    params: dict = field(default={})
+    algorithm: GAM | ExtraTreesRegressor | GradientBoostingRegressor = field(
+        converter=_algorithm_converter
+    )
+    params: dict[str, Any] = field(default={})  # Any: arbitrary sklearn/pygam hyperparameters
 
     # Internal, non-user specified attributes
-    hyper_range: dict = field(default={}, init=False)
-    my_scorer: Any = field(init=False)
-    random_search: Any = field(init=False)
-    opt_hyp: Any = field(init=False)
-    opt_model: Any = field(init=False)
+    hyper_range: dict[str, Any] = field(default={}, init=False)  # Any: see ``params``
+    my_scorer: Any = field(init=False)  # Any: sklearn scorers are untyped callables
+    random_search: RandomizedSearchCV = field(init=False)
+    opt_hyp: dict[str, Any] = field(init=False)  # Any: see ``params``
+    opt_model: GAM | ExtraTreesRegressor | GradientBoostingRegressor = field(init=False)
 
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         """
         Initialize the hyperparameter ranges and scorer object
         """
@@ -136,7 +146,7 @@ class MachineLearningSetup:
         # Set scorer as R2
         self.my_scorer = make_scorer(r2_score, greater_is_better=True)
 
-    def hyper_report(self, results: dict, n_top: int = 5) -> None:
+    def hyper_report(self, results: dict[str, Any], n_top: int = 5) -> None:
         """
         Output hyperparameter optimization results into terminal window in order of mean validation score.
 
@@ -163,8 +173,8 @@ class MachineLearningSetup:
 
     def hyper_optimize(
         self,
-        X: np.ndarray | pd.DataFrame,
-        y: np.ndarray | pd.Series,
+        X: NDArray[np.floating[Any]] | pd.DataFrame,
+        y: NDArray[np.floating[Any]] | pd.Series,
         cv: sklearn.model_selection._split = KFold(n_splits=5),
         n_iter_search: int = 20,
         report: bool = True,

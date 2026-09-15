@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import sys
 import random
+import logging
 import datetime
 from copy import deepcopy
+from typing import Any, TypeVar, Iterable, Sequence, TypeAlias, cast
 
 import attrs
 import numpy as np
@@ -12,8 +13,12 @@ import numpy.typing as npt
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
 from attrs import field, define
-from tqdm.auto import tqdm, trange
+from pygam import GAM
+from tqdm.auto import trange
+from matplotlib.axes import Axes
 from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.ensemble import ExtraTreesRegressor, GradientBoostingRegressor
+from matplotlib.figure import Figure
 from matplotlib.markers import MarkerStyle
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import KFold
@@ -24,7 +29,7 @@ from openoa.utils import timeseries as tm
 from openoa.utils import unit_conversion as un
 from openoa.utils import met_data_processing as mt
 from openoa.schema import FromDictMixin, ResetValuesMixin
-from openoa.logging import logging, logged_method_call
+from openoa.logging import logged_method_call
 from openoa.schema.metadata import convert_frequency
 from openoa.utils.machine_learning_setup import MachineLearningSetup
 from openoa.analysis._analysis_validators import validate_reanalysis_selections
@@ -32,12 +37,61 @@ from openoa.analysis._analysis_validators import validate_reanalysis_selections
 logger = logging.getLogger(__name__)
 
 NDArrayFloat = npt.NDArray[np.float64]
+_RegressionModel: TypeAlias = (
+    LinearRegression | GAM | ExtraTreesRegressor | GradientBoostingRegressor
+)
+_T = TypeVar("_T")
+
+# Any: matplotlib/analysis keyword-argument pass-throughs accept arbitrary values
+_Kwargs = dict[str, Any]
 
 
 plot.set_styling()
 
 
-def get_annual_values(data):
+def _copy_plant(plant: PlantData) -> PlantData:
+    """Deep copies the plant so the analysis never mutates the user's ``PlantData``."""
+    return deepcopy(plant)
+
+
+def _to_float_array(value: float | Sequence[float] | NDArrayFloat) -> NDArrayFloat:
+    """Converts the uncertainty bounds to a NumPy array."""
+    return np.array(value)
+
+
+def _convert_frequency(offset: str) -> str:
+    """Typed pass-through to the ``logged_method_call``-wrapped :py:func:`convert_frequency`."""
+    return convert_frequency(offset)
+
+
+def _datetime_index(index: pd.Index) -> pd.DatetimeIndex:
+    """Narrows a pandas ``Index`` to the ``DatetimeIndex`` the analysis data must have."""
+    if not isinstance(index, pd.DatetimeIndex):
+        raise TypeError("A DatetimeIndex is required for the analysis data.")
+    return index
+
+
+def _index_freq(index: pd.DatetimeIndex) -> pd.offsets.BaseOffset:
+    """Returns the frequency offset of a regular ``DatetimeIndex``."""
+    if (freq := index.freq) is None:
+        raise ValueError("The DatetimeIndex must have a frequency set.")
+    return freq
+
+
+def _default(attribute: attrs.Attribute[_T]) -> _T:
+    """Returns the default of a user-facing ``MonteCarloAEP`` field, all of which define one."""
+    # cast: attrs types ``default`` as optional, but every field passed here has a default set
+    return cast("_T", attribute.default)
+
+
+def _as_series(obj: pd.Series | pd.DataFrame) -> pd.Series:
+    """Narrows a pandas object that is a ``Series`` for the analysis' single-column usage."""
+    if not isinstance(obj, pd.Series):
+        raise TypeError("A pandas Series is required.")
+    return obj
+
+
+def get_annual_values(data: pd.Series | pd.DataFrame) -> NDArrayFloat:
     """
     This function returns annual summations of values in a pandas Series (or each column of a pandas DataFrame) with a
     DatetimeIndex index starting from the first row. The purpose of the function is to correctly resample to annual
@@ -52,11 +106,13 @@ def get_annual_values(data):
 
     # shift time index to beginning of first month so resampling by 'MS' groups the data into full years
     # starting from the beginning of the time series
-    ix_start = data.index[0]
+    index = _datetime_index(data.index)
+    ix_start = index[0]
     month_start = ix_start.floor("d") + pd.offsets.MonthEnd(0) - pd.offsets.MonthBegin(1)
-    data.index = data.index - pd.Timedelta(ix_start - month_start)
+    data.index = index - pd.Timedelta(ix_start - month_start)
 
-    return data.resample("12MS").sum().values
+    annual: NDArrayFloat = data.resample("12MS").sum().to_numpy()
+    return annual
 
 
 # TODO: Split this into a more generic naming convention to have other AEP methods, such as QMC
@@ -125,7 +181,9 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             energy production estimates. Defaults to ``True``.
     """
 
-    plant: PlantData = field(converter=deepcopy, validator=attrs.validators.instance_of(PlantData))
+    plant: PlantData = field(
+        converter=_copy_plant, validator=attrs.validators.instance_of(PlantData)
+    )
     reg_temperature: bool = field(default=False, converter=bool)
     reg_wind_direction: bool = field(default=False, converter=bool)
     reanalysis_products: list[str] = field(
@@ -142,16 +200,16 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
     uncertainty_meter: float = field(default=0.005, converter=float)
     uncertainty_losses: float = field(default=0.05, converter=float)
     uncertainty_windiness: NDArrayFloat = field(
-        default=(10.0, 20.0),
-        converter=np.array,
+        default=np.array((10.0, 20.0)),
+        converter=_to_float_array,
         validator=attrs.validators.deep_iterable(
             iterable_validator=attrs.validators.instance_of(np.ndarray),
             member_validator=attrs.validators.instance_of(float),
         ),
     )
     uncertainty_loss_max: NDArrayFloat = field(
-        default=(10.0, 20.0),
-        converter=np.array,
+        default=np.array((10.0, 20.0)),
+        converter=_to_float_array,
         validator=attrs.validators.deep_iterable(
             iterable_validator=attrs.validators.instance_of(np.ndarray),
             member_validator=attrs.validators.instance_of(float),
@@ -159,8 +217,8 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
     )
     outlier_detection: bool = field(default=False, converter=bool)
     uncertainty_outlier: NDArrayFloat = field(
-        default=(1.0, 3.0),
-        converter=np.array,
+        default=np.array((1.0, 3.0)),
+        converter=_to_float_array,
         validator=attrs.validators.deep_iterable(
             iterable_validator=attrs.validators.instance_of(np.ndarray),
             member_validator=attrs.validators.instance_of(float),
@@ -169,14 +227,14 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
     uncertainty_nan_energy: float = field(default=0.01, converter=float)
     time_resolution: str = field(
         default="MS",
-        converter=convert_frequency,
+        converter=_convert_frequency,
         validator=attrs.validators.in_(("MS", "ME", "D", "h")),
     )
-    end_date_lt: str | pd.Timestamp = field(default=None)
+    end_date_lt: str | pd.Timestamp | None = field(default=None)
     reg_model: str = field(
         default="lin", converter=str, validator=attrs.validators.in_(("lin", "gbm", "etr", "gam"))
     )
-    ml_setup_kwargs: dict = field(default={}, converter=dict)
+    ml_setup_kwargs: _Kwargs = field(default={}, converter=dict)
     n_jobs: int | None = field(
         default=None, validator=attrs.validators.instance_of((int, type(None)))
     )
@@ -186,15 +244,15 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
     resample_freq: str = field(init=False)
     resample_hours: int = field(init=False)
     calendar_samples: int = field(init=False)
-    outlier_filtering: dict = field(factory=dict, init=False)
-    long_term_sampling: dict = field(factory=dict, init=False)
-    opt_model: dict = field(factory=dict, init=False)
+    outlier_filtering: dict[tuple[str, float], pd.DataFrame] = field(factory=dict, init=False)
+    long_term_sampling: dict[tuple[str, int], pd.DataFrame] = field(factory=dict, init=False)
+    opt_model: dict[str, _RegressionModel] = field(factory=dict, init=False)
     reanalysis_vars: list[str] = field(factory=list, init=False)
     aggregate: pd.DataFrame = field(init=False)
     start_por: pd.Timestamp = field(init=False)
     end_por: pd.Timestamp = field(init=False)
     reanalysis_por: pd.DataFrame = field(init=False)
-    num_days_lt: tuple = field(
+    num_days_lt: tuple[float, ...] = field(
         default=(31, 28.25, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31),
         init=False,
     )
@@ -207,7 +265,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
     _mse_score: NDArrayFloat = field(init=False)
     _mc_intercept: NDArrayFloat = field(init=False)
     _mc_slope: NDArrayFloat = field(init=False)
-    _run: pd.DataFrame = field(init=False)
+    _run: pd.Series = field(init=False)
     results: pd.DataFrame = field(init=False)
     run_parameters: list[str] = field(
         init=False,
@@ -229,7 +287,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
     )
 
     @logged_method_call
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         """
         Initialize the Monte Carlo AEP analysis with data and parameters.
         """
@@ -246,8 +304,11 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         else:
             analysis_type = "MonteCarloAEP"
 
-        if {analysis_type, "all"}.intersection(self.plant.analysis_type) == set():
-            self.plant.analysis_type.append(analysis_type)
+        plant_analysis_types = self.plant.analysis_type
+        if plant_analysis_types is not None and {analysis_type, "all"}.isdisjoint(
+            plant_analysis_types
+        ):
+            plant_analysis_types.append(analysis_type)
 
         # Ensure the data are up to spec before continuing with initialization
         self.plant.validate()
@@ -273,8 +334,9 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         self.calculate_aggregate_dataframe()
 
         # Store start and end of period of record
-        self.start_por = self.aggregate.index.min()
-        self.end_por = self.aggregate.index.max()
+        aggregate_index = _datetime_index(self.aggregate.index)
+        self.start_por = aggregate_index.min()
+        self.end_por = aggregate_index.max()
 
         # Create a data frame to store monthly/daily reanalysis data over plant period of record
         self.reanalysis_por = self.aggregate.loc[
@@ -285,18 +347,18 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
     def run(
         self,
         num_sim: int,
-        reg_model: str = None,
-        reanalysis_products: list[str] = None,
-        uncertainty_meter: float = None,
-        uncertainty_losses: float = None,
-        uncertainty_windiness: float | tuple[float, float] = None,
-        uncertainty_loss_max: float | tuple[float, float] = None,
-        outlier_detection: bool = None,
-        uncertainty_outlier: float | tuple[float, float] = None,
-        uncertainty_nan_energy: float = None,
-        time_resolution: str = None,
+        reg_model: str | None = None,
+        reanalysis_products: list[str] | None = None,
+        uncertainty_meter: float | None = None,
+        uncertainty_losses: float | None = None,
+        uncertainty_windiness: float | tuple[float, float] | None = None,
+        uncertainty_loss_max: float | tuple[float, float] | None = None,
+        outlier_detection: bool | None = None,
+        uncertainty_outlier: float | tuple[float, float] | None = None,
+        uncertainty_nan_energy: float | None = None,
+        time_resolution: str | None = None,
         end_date_lt: str | pd.Timestamp | None = None,
-        ml_setup_kwargs: dict = None,
+        ml_setup_kwargs: _Kwargs | None = None,
         progress_bar: bool = True,
     ) -> None:
         """
@@ -344,7 +406,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             None
         """
         self.num_sim = num_sim
-        initial_parameters = {}
+        initial_parameters: dict[str, object] = {}
         if reanalysis_products is not None:
             initial_parameters["reanalysis_products"] = self.reanalysis_products
             self.reanalysis_products = reanalysis_products
@@ -359,16 +421,16 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             self.uncertainty_losses = uncertainty_losses
         if uncertainty_windiness is not None:
             initial_parameters["uncertainty_windiness"] = self.uncertainty_windiness
-            self.uncertainty_windiness = uncertainty_windiness
+            self.uncertainty_windiness = _to_float_array(uncertainty_windiness)
         if uncertainty_loss_max is not None:
             initial_parameters["uncertainty_loss_max"] = self.uncertainty_loss_max
-            self.uncertainty_loss_max = uncertainty_loss_max
+            self.uncertainty_loss_max = _to_float_array(uncertainty_loss_max)
         if outlier_detection is not None:
             initial_parameters["outlier_detection"] = self.outlier_detection
             self.outlier_detection = outlier_detection
         if uncertainty_outlier is not None:
             initial_parameters["uncertainty_outlier"] = self.uncertainty_outlier
-            self.uncertainty_outlier = uncertainty_outlier
+            self.uncertainty_outlier = _to_float_array(uncertainty_outlier)
         if uncertainty_nan_energy is not None:
             initial_parameters["uncertainty_nan_energy"] = self.uncertainty_nan_energy
             self.uncertainty_nan_energy = uncertainty_nan_energy
@@ -406,7 +468,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         self.set_values(initial_parameters)
 
     @logged_method_call
-    def groupby_time_res(self, df):
+    def groupby_time_res(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Group pandas dataframe based on the time resolution chosen in the calculation.
 
@@ -417,17 +479,20 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             None
         """
 
+        index = _datetime_index(df.index)
         if self.time_resolution in ("MS", "ME"):
-            df_grouped = df.groupby(df.index.month).mean()
+            df_grouped = df.groupby(index.month).mean()
         elif self.time_resolution == "D":
-            df_grouped = df.groupby([(df.index.month), (df.index.day)]).mean()
+            df_grouped = df.groupby([(index.month), (index.day)]).mean()
         elif self.time_resolution == "h":
-            df_grouped = df.groupby([(df.index.month), (df.index.day), (df.index.hour)]).mean()
+            df_grouped = df.groupby([(index.month), (index.day), (index.hour)]).mean()
+        else:
+            raise ValueError(f"Unsupported time resolution: {self.time_resolution}")
 
         return df_grouped
 
     @logged_method_call
-    def calculate_aggregate_dataframe(self):
+    def calculate_aggregate_dataframe(self) -> None:
         """
         Perform pre-processing of the plant data to produce a monthly/daily data frame to be used in AEP analysis.
         """
@@ -451,15 +516,36 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             subset=["gross_energy_gwh"] + [product for product in self.reanalysis_products]
         )
 
+    @property
+    def _meter(self) -> pd.DataFrame:
+        """The plant's meter data, which is guaranteed by ``PlantData.validate()``."""
+        if (meter := self.plant.meter) is None:
+            raise ValueError("The plant does not contain meter data.")
+        return meter
+
+    @property
+    def _curtail(self) -> pd.DataFrame:
+        """The plant's curtailment data, which is guaranteed by ``PlantData.validate()``."""
+        if (curtail := self.plant.curtail) is None:
+            raise ValueError("The plant does not contain curtailment data.")
+        return curtail
+
+    @property
+    def _reanalysis(self) -> dict[str, pd.DataFrame]:
+        """The plant's reanalysis data, which is guaranteed by ``PlantData.validate()``."""
+        if (reanalysis := self.plant.reanalysis) is None:
+            raise ValueError("The plant does not contain reanalysis data.")
+        return reanalysis
+
     @logged_method_call
-    def process_revenue_meter_energy(self):
+    def process_revenue_meter_energy(self) -> None:
         """
         Initial creation of monthly data frame:
             1. Populate monthly/daily data frame with energy data summed from 10-min QC'd data
             2. For each monthly/daily value, find percentage of NaN data used in creating it and flag if percentage is
                greater than 0
         """
-        df = self.plant.meter  # Get the meter data frame
+        df = self._meter  # Get the meter data frame
 
         # Create the monthly/daily data frame by summing meter energy, in GWh
         self.aggregate = df.resample(self.resample_freq)["MMTR_SupWh"].sum().to_frame() / 1e6
@@ -488,12 +574,12 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
                 )
 
     @logged_method_call
-    def process_loss_estimates(self):
+    def process_loss_estimates(self) -> None:
         """Append availability and curtailment losses to monthly data frame."""
-        df = self.plant.curtail.copy()
+        df = self._curtail.copy()
 
-        curt_aggregate = np.divide(
-            df.resample(self.resample_freq)[["IAVL_DnWh", "IAVL_ExtPwrDnWh"]].sum(), 1e6
+        curt_aggregate = (
+            df.resample(self.resample_freq)[["IAVL_DnWh", "IAVL_ExtPwrDnWh"]].sum() / 1e6
         )  # Get sum of avail and curt losses in GWh
 
         curt_aggregate.rename(
@@ -544,7 +630,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         self.aggregate["combined_loss_valid"] = True
 
     @logged_method_call
-    def process_reanalysis_data(self):
+    def process_reanalysis_data(self) -> None:
         """
         Process reanalysis data for use in PRUF plant analysis:
             - calculate density-corrected wind speed and wind components
@@ -556,10 +642,13 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
 
         # Identify start and end dates for long-term correction
         # First find date range common to all reanalysis products and drop minute field of start date
-        start_date = max(
-            [self.plant.reanalysis[key].index.min() for key in self.reanalysis_products]
+        reanalysis = self._reanalysis
+        start_date: pd.Timestamp = max(
+            [reanalysis[key].index.min() for key in self.reanalysis_products]
         ).replace(minute=0)
-        end_date = min([self.plant.reanalysis[key].index.max() for key in self.reanalysis_products])
+        end_date: pd.Timestamp = min(
+            [reanalysis[key].index.max() for key in self.reanalysis_products]
+        )
 
         # Next, update the start date to make sure it corresponds to a full time period, by shifting
         # to either the start of the next month, or start of the next day, depending on the frequency
@@ -573,19 +662,20 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         # last full month, or last full day
         if self.end_date_lt is not None:
             # If valid (before the last full time period in the data), use the specified end date
-            end_date_lt_plus = self.end_date_lt + pd.DateOffset(hours=1)
+            end_date_lt = pd.Timestamp(self.end_date_lt)
+            end_date_lt_plus = end_date_lt + pd.DateOffset(hours=1)
             if (self.time_resolution in ("MS", "ME")) & (
-                self.end_date_lt.month == end_date_lt_plus.month
+                end_date_lt.month == end_date_lt_plus.month
             ):
                 self.end_date_lt = (
-                    self.end_date_lt.replace(day=1, hour=0, minute=0)
+                    end_date_lt.replace(day=1, hour=0, minute=0)
                     + pd.DateOffset(months=1)
                     - pd.DateOffset(hours=1)
                 )
-            elif (self.time_resolution == "D") & (self.end_date_lt.day == end_date_lt_plus.day):
-                self.end_date_lt = self.end_date_lt.replace(hour=23, minute=0)
+            elif (self.time_resolution == "D") & (end_date_lt.day == end_date_lt_plus.day):
+                self.end_date_lt = end_date_lt.replace(hour=23, minute=0)
 
-            if self.end_date_lt > end_date:
+            if pd.Timestamp(self.end_date_lt) > end_date:
                 raise ValueError(
                     "Invalid end date for long-term correction. The end date cannot exceed the "
                     "last full time period (defined by the time resolution) in the provided "
@@ -593,25 +683,23 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
                 )
             else:
                 # replace end date
-                end_date = self.end_date_lt
+                end_date = pd.Timestamp(self.end_date_lt)
         else:
             # If not at the end of a month, use the end of the previous month as the end date
             if end_date.month == (end_date + pd.DateOffset(hours=1)).month:
                 end_date = end_date.replace(day=1, hour=0, minute=0) - pd.DateOffset(hours=1)
 
         # Define empty data frame that spans our period of interest
-        self._reanalysis_aggregate = pd.DataFrame(
-            index=pd.date_range(start=start_date, end=end_date, freq=self.resample_freq),
-            dtype=float,
-        )
+        lt_index = pd.date_range(start=start_date, end=end_date, freq=self.resample_freq)
+        self._reanalysis_aggregate = pd.DataFrame(index=lt_index, dtype=float)
 
         # Check if the date range covers the maximum number of years needed for the windiness correction
         start_date_required = (
-            self._reanalysis_aggregate.index[-1]
-            + self._reanalysis_aggregate.index.freq
+            lt_index[-1]
+            + _index_freq(lt_index)
             - pd.offsets.DateOffset(years=self.uncertainty_windiness[1])
         )
-        if self._reanalysis_aggregate.index[0] > start_date_required:
+        if lt_index[0] > start_date_required:
             if self.end_date_lt is not None:
                 raise ValueError(
                     "Invalid end date argument for long-term correction. This end date does not "
@@ -625,7 +713,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
 
         # Correct each reanalysis product, density-correct wind speeds, and take monthly averages
         for key in self.reanalysis_products:
-            rean_df = self.plant.reanalysis[key]
+            rean_df = reanalysis[key]
             # rean_df = rean_df.rename(self.plant.metadata[key].col_map)
             rean_df["ws_dens_corr"] = mt.air_density_adjusted_wind_speed(
                 rean_df["WMETR_HorWdSpd"], rean_df["WMETR_AirDen"]
@@ -656,7 +744,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         )  # Merge monthly reanalysis data to monthly energy data frame
 
     @logged_method_call
-    def trim_monthly_df(self):
+    def trim_monthly_df(self) -> None:
         """
         Remove first and/or last month of data if the raw data had an incomplete number of days.
         """
@@ -668,7 +756,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
                 self.aggregate.drop(p, inplace=True)  # Drop the row from data frame
 
     @logged_method_call
-    def calculate_long_term_losses(self):
+    def calculate_long_term_losses(self) -> None:
         """
         This function calculates long-term availability and curtailment losses based on the reported
         data grouped by the time resolution, filtering for those data that are deemed representative
@@ -697,7 +785,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         self.long_term_losses = (avail_long_term, curt_long_term)
 
     @logged_method_call
-    def setup_monte_carlo_inputs(self):
+    def setup_monte_carlo_inputs(self) -> None:
         """
         Create and populate the data frame defining the simulation parameters.
         This data frame is stored as self.mc_inputs
@@ -706,7 +794,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         # Create extra long list of renanalysis product names to sample from
         reanal_list = list(np.repeat(self.reanalysis_products, self.num_sim))
 
-        inputs = {
+        inputs: dict[str, npt.NDArray[Any]] = {  # Any: mixed str/float/int Monte Carlo inputs
             "reanalysis_product": np.asarray(random.sample(reanal_list, self.num_sim)),
             "metered_energy_fraction": np.random.normal(1, self.uncertainty_meter, self.num_sim),
             "loss_fraction": np.random.normal(1, self.uncertainty_losses, self.num_sim),
@@ -731,7 +819,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         self.mc_inputs = pd.DataFrame(inputs)
 
     @logged_method_call
-    def filter_outliers(self, n):
+    def filter_outliers(self, n: int) -> pd.DataFrame:
         """
         This function filters outliers based on a combination of range filter, unresponsive sensor
         filter, and window filter.
@@ -752,8 +840,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
 
         # Check if valid data has already been calculated and stored. If so, just return it
         if (reanal, self._run.loss_threshold) in self.outlier_filtering:
-            valid_data = self.outlier_filtering[(reanal, self._run.loss_threshold)]
-            return valid_data
+            return self.outlier_filtering[(reanal, self._run.loss_threshold)]
 
         # If valid data hasn't yet been stored in dictionary, determine the valid data
         df = self.aggregate
@@ -773,12 +860,14 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         plant_capac = self.plant.metadata.capacity / 1000.0 * self.resample_hours
 
         # Apply range filter to wind speed
-        df_sub = df_sub.assign(flag_range=filters.range_flag(df_sub[reanal], lower=0, upper=40))
+        df_sub = df_sub.assign(
+            flag_range=_as_series(filters.range_flag(df_sub[reanal], lower=0, upper=40))
+        )
         if self.reg_temperature:
             # Apply range filter to temperature, in Kelvin
             df_sub = df_sub.assign(
-                flag_range_T=filters.range_flag(
-                    df_sub[f"{reanal}_WMETR_EnvTmp"], lower=200, upper=320
+                flag_range_T=_as_series(
+                    filters.range_flag(df_sub[f"{reanal}_WMETR_EnvTmp"], lower=200, upper=320)
                 )
             )
         # Apply window range filter
@@ -833,7 +922,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             df_sub.loc[:, "flag_final"] = df_sub[["flag_final", "flag_range_T"]].any(axis=1)
 
         # Define valid data
-        valid_data = df_sub.loc[
+        valid_data: pd.DataFrame = df_sub.loc[
             ~df_sub.loc[:, "flag_final"],
             [reanal, "energy_gwh", "availability_gwh", "curtailment_gwh"],
         ]
@@ -859,7 +948,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         return valid_data
 
     @logged_method_call
-    def set_regression_data(self, n):
+    def set_regression_data(self, n: int) -> pd.DataFrame:
         """
         This will be called for each iteration of the Monte Carlo simulation and will do the following:
 
@@ -898,7 +987,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             mc_gross_norm = mc_gross_energy
 
         # Set reanalysis product for MC inputs
-        reg_inputs = reg_data[self._run.reanalysis_product]
+        reg_inputs: pd.Series | pd.DataFrame = reg_data[self._run.reanalysis_product]
 
         if self.reg_temperature:  # if temperature is considered as regression variable
             mc_temperature = reg_data[f"{self._run.reanalysis_product}_WMETR_EnvTmp"]
@@ -909,12 +998,13 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             reg_inputs = pd.concat([reg_inputs, np.sin(np.deg2rad(mc_wind_direction))], axis=1)
             reg_inputs = pd.concat([reg_inputs, np.cos(np.deg2rad(mc_wind_direction))], axis=1)
 
-        reg_inputs = pd.concat([reg_inputs, mc_gross_norm], axis=1)
         # Return values needed for regression
-        return reg_inputs  # Return randomly sampled wind speed, wind direction, temperature and normalized gross energy
+        # Return randomly sampled wind speed, wind direction, temperature and normalized gross energy
+        regression_inputs: pd.DataFrame = pd.concat([reg_inputs, mc_gross_norm], axis=1)
+        return regression_inputs
 
     @logged_method_call
-    def run_regression(self, n):
+    def run_regression(self, n: int) -> _RegressionModel:
         """
         Run robust linear regression between Monte-Carlo generated monthly/daily gross energy,
         wind speed, temperature and wind direction (if used)
@@ -925,10 +1015,10 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         Returns:
             A trained regression model.
         """
-        reg_data = self.set_regression_data(n)  # Get regression data
+        reg_df = self.set_regression_data(n)  # Get regression data
 
         # Bootstrap input data to incorporate some regression uncertainty
-        reg_data = np.array(reg_data.sample(frac=1.0, replace=True))
+        reg_data: NDArrayFloat = np.array(reg_df.sample(frac=1.0, replace=True))
 
         # Update Monte Carlo tracker fields
         self._mc_num_points[n] = np.shape(reg_data)[0]
@@ -936,7 +1026,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         # Run regression. Note, the last column of reg_data is the target variable for the regression
         # Linear regression
         if self.reg_model == "lin":
-            reg = LinearRegression(n_jobs=self.n_jobs).fit(
+            reg: LinearRegression = LinearRegression(n_jobs=self.n_jobs).fit(
                 np.array(reg_data[:, 0:-1]), reg_data[:, -1]
             )
             predicted_y = reg.predict(np.array(reg_data[:, 0:-1]))
@@ -981,7 +1071,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             return self.opt_model[(self._run.reanalysis_product)]
 
     @logged_method_call
-    def run_AEP_monte_carlo(self, progress_bar: bool = True):
+    def run_AEP_monte_carlo(self, progress_bar: bool = True) -> pd.DataFrame:
         """
         Loop through OA process a number of times and return array of AEP results each time
 
@@ -1010,16 +1100,16 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             self._mc_intercept = np.empty(num_sim, dtype=np.float64)
             self._mc_slope = np.empty([num_sim, num_vars], dtype=np.float64)
 
-        aep_GWh = np.empty(num_sim)
-        avail_pct = np.empty(num_sim)
-        curt_pct = np.empty(num_sim)
-        lt_por_ratio = np.empty(num_sim)
-        iav = np.empty(num_sim)
+        aep_GWh: NDArrayFloat = np.empty(num_sim)
+        avail_pct: NDArrayFloat = np.empty(num_sim)
+        curt_pct: NDArrayFloat = np.empty(num_sim)
+        lt_por_ratio: NDArrayFloat = np.empty(num_sim)
+        iav: NDArrayFloat = np.empty(num_sim)
 
         # Loop through number of simulations, run regression each time, store AEP results
-        _range = trange(num_sim) if progress_bar else np.arange(num_sim)
+        _range: Iterable[int] = trange(num_sim) if progress_bar else np.arange(num_sim)
         for n in _range:
-            self._run = self.mc_inputs.loc[n]
+            self._run = _as_series(self.mc_inputs.loc[n])
 
             # Run regression
             fitted_model = self.run_regression(n)
@@ -1031,7 +1121,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             inputs = np.array(reg_inputs_lt)
             if num_vars == 1:
                 inputs = inputs.reshape(-1, 1)
-            gross_lt = fitted_model.predict(inputs)
+            gross_lt: NDArrayFloat = fitted_model.predict(inputs)
 
             # Get POR gross energy by applying regression result to POR regression inputs
             reg_inputs_por = [self.reanalysis_por[self._run.reanalysis_product]]
@@ -1054,12 +1144,15 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
                         )
                     )
                 ]
-            gross_por = fitted_model.predict(np.array(pd.concat(reg_inputs_por, axis=1)))
+            gross_por_pred: NDArrayFloat = fitted_model.predict(
+                np.array(pd.concat(reg_inputs_por, axis=1))
+            )
 
             # Create padans dataframe for gross_por and group by calendar date to have a single full year
-            gross_por = self.groupby_time_res(
+            gross_por: NDArrayFloat | pd.DataFrame = self.groupby_time_res(
                 pd.DataFrame(
-                    data=gross_por, index=self.reanalysis_por[self._run.reanalysis_product].index
+                    data=gross_por_pred,
+                    index=self.reanalysis_por[self._run.reanalysis_product].index,
                 )
             )
 
@@ -1093,7 +1186,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             curt_pct[n] = curt_lt_losses
             gps = (
                 gross_por.sum()
-                if not isinstance(gross_por, (pd.Series, pd.DataFrame))
+                if not isinstance(gross_por, pd.DataFrame)
                 else gross_por.values.sum()
             )
             lt_por_ratio[n] = (gross_lt.sum() / self._run.num_years_windiness) / gps
@@ -1124,7 +1217,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         return sim_results
 
     @logged_method_call
-    def sample_long_term_reanalysis(self):
+    def sample_long_term_reanalysis(self) -> pd.DataFrame:
         """
         This function returns the long-term monthly/daily wind speeds based on the Monte-Carlo
         generated sample of:
@@ -1136,6 +1229,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
            :obj:`pandas.DataFrame`: the windiness-corrected or 'long-term' monthly/daily wind speeds
         """
         # Check if valid data has already been calculated and stored. If so, just return it
+        long_term_reg_inputs: pd.DataFrame
         if (self._run.reanalysis_product, self._run.num_years_windiness) in self.long_term_sampling:
             long_term_reg_inputs = self.long_term_sampling[
                 (self._run.reanalysis_product, self._run.num_years_windiness)
@@ -1146,19 +1240,18 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         ws_df = (
             self._reanalysis_aggregate[self._run.reanalysis_product].to_frame().dropna()
         )  # Drop NA values from monthly/daily reanalysis data series
-        long_term_reg_inputs = ws_df[
-            ws_df.index[-1]
-            + ws_df.index.freq
-            - pd.offsets.DateOffset(years=self._run.num_years_windiness) :
-        ]  # Get last 'x' years of data from reanalysis product
+        ws_index = _datetime_index(ws_df.index)
+        lt_start = (
+            ws_index[-1]
+            + _index_freq(ws_index)
+            - pd.offsets.DateOffset(years=self._run.num_years_windiness)
+        )
+        # Get last 'x' years of data from reanalysis product
+        long_term_reg_inputs = ws_df[lt_start:]
 
         # Temperature and wind direction
         namescol = [f"{self._run.reanalysis_product}_{var}" for var in self.reanalysis_vars]
-        long_term_temp = self._reanalysis_aggregate[namescol].dropna()[
-            ws_df.index[-1]
-            + ws_df.index.freq
-            - pd.offsets.DateOffset(years=self._run.num_years_windiness) :
-        ]
+        long_term_temp: pd.DataFrame = self._reanalysis_aggregate[namescol].dropna()[lt_start:]
         if self.reg_temperature:
             long_term_reg_inputs = pd.concat(
                 [
@@ -1168,18 +1261,15 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
                 axis=1,
             )
         if self.reg_wind_direction:
-            wd_aggregate = np.rad2deg(
-                np.pi
-                - np.arctan2(
-                    -long_term_temp[f"{self._run.reanalysis_product}_WMETR_HorWdSpdU"],
-                    long_term_temp[f"{self._run.reanalysis_product}_WMETR_HorWdSpdV"],
-                )
+            wd_rad: NDArrayFloat = np.pi - np.arctan2(
+                -long_term_temp[f"{self._run.reanalysis_product}_WMETR_HorWdSpdU"].to_numpy(),
+                long_term_temp[f"{self._run.reanalysis_product}_WMETR_HorWdSpdV"].to_numpy(),
             )  # Calculate wind direction
             long_term_reg_inputs = pd.concat(
                 [
                     long_term_reg_inputs,
-                    np.sin(np.deg2rad(wd_aggregate)),
-                    np.cos(np.deg2rad(wd_aggregate)),
+                    pd.Series(np.sin(wd_rad), index=long_term_temp.index),
+                    pd.Series(np.cos(wd_rad), index=long_term_temp.index),
                 ],
                 axis=1,
             )
@@ -1193,7 +1283,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         return long_term_reg_inputs.copy()
 
     @logged_method_call
-    def sample_long_term_losses(self, gross_lt):
+    def sample_long_term_losses(self, gross_lt: pd.Series) -> tuple[float, float]:
         """
         This function calculates long-term availability and curtailment losses based on the Monte Carlo sampled
         historical availability and curtailment data. To estimate long-term losses, average percentage monthly losses
@@ -1211,11 +1301,11 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
 
         # Calculate annualized monthly average long-term gross energy
         # Rename axis to time to be consistent with mc_avail and mc_curt when combining variables
-        gross_lt_avg = self.groupby_time_res(gross_lt.rename_axis("time"))
+        gross_lt_avg = self.groupby_time_res(gross_lt.rename_axis("time").to_frame()).iloc[:, 0]
 
         # Estimate long-term losses by weighting monthly losses by long-term monthly gross energy
-        mc_avail_lt = (gross_lt_avg * mc_avail).sum() / gross_lt_avg.sum()
-        mc_curt_lt = (gross_lt_avg * mc_curt).sum() / gross_lt_avg.sum()
+        mc_avail_lt: float = (gross_lt_avg * mc_avail).sum() / gross_lt_avg.sum()
+        mc_curt_lt: float = (gross_lt_avg * mc_curt).sum() / gross_lt_avg.sum()
 
         # Return long-term availabilty and curtailment
         return mc_avail_lt, mc_curt_lt
@@ -1224,13 +1314,13 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
 
     def plot_normalized_monthly_reanalysis_windspeed(
         self,
-        xlim: tuple[datetime.datetime, datetime.datetime] = (None, None),
-        ylim: tuple[float, float] = (None, None),
+        xlim: tuple[datetime.datetime | None, datetime.datetime | None] = (None, None),
+        ylim: tuple[float | None, float | None] = (None, None),
         return_fig: bool = False,
-        figure_kwargs: dict | None = None,
-        plot_kwargs: dict | None = None,
-        legend_kwargs: dict | None = None,
-    ) -> None | tuple[plt.Figure, plt.Axes]:
+        figure_kwargs: _Kwargs | None = None,
+        plot_kwargs: _Kwargs | None = None,
+        legend_kwargs: _Kwargs | None = None,
+    ) -> None | tuple[Figure, Axes]:
         """Make a plot of the normalized annual average wind speeds from reanalysis data to show
         general trends for each, and highlighting the period of record for the plant data.
 
@@ -1252,8 +1342,10 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             None | tuple[matplotlib.pyplot.Figure, matplotlib.pyplot.Axes]: If ``return_fig`` is
                 True, then the figure and axes objects are returned for further tinkering/saving.
         """
+        # arg-type: openoa.utils.plot declares the limits as non-optional tuples with (None, None)
+        # defaults; it is typed separately, so the optional limits are passed through unchanged
         return plot.plot_monthly_reanalysis_windspeed(
-            data=self.plant.reanalysis,
+            data=self._reanalysis,
             windspeed_col="ws_dens_corr",
             plant_por=(self.aggregate.index[0], self.aggregate.index[-1]),
             xlim=xlim,
@@ -1267,13 +1359,13 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
     def plot_reanalysis_gross_energy_data(
         self,
         outlier_threshold: int,
-        xlim: tuple[float, float] = (None, None),
-        ylim: tuple[float, float] = (None, None),
+        xlim: tuple[float | None, float | None] = (None, None),
+        ylim: tuple[float | None, float | None] = (None, None),
         return_fig: bool = False,
-        figure_kwargs: dict | None = None,
-        plot_kwargs: dict | None = None,
-        legend_kwargs: dict | None = None,
-    ) -> None | tuple[plt.Figure, plt.Axes]:
+        figure_kwargs: _Kwargs | None = None,
+        plot_kwargs: _Kwargs | None = None,
+        legend_kwargs: _Kwargs | None = None,
+    ) -> None | tuple[Figure, Axes]:
         """
         Makes a plot of the gross energy vs wind speed for each reanalysis product, with outliers
         highlighted in a contrasting color and separate marker.
@@ -1327,7 +1419,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
 
         # Monthly case: apply robust linear regression for outliers detection
         if self.time_resolution in ("MS", "ME"):
-            for name, df in self.plant.reanalysis.items():
+            for name in self._reanalysis:
                 x = sm.add_constant(valid_aggregate[name])
                 y = valid_aggregate["gross_energy_gwh"] * 30 / valid_aggregate["num_days_expected"]
                 rlm = sm.RLM(y, x, M=sm.robust.norms.HuberT(t=outlier_threshold))
@@ -1353,7 +1445,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
 
         # Daily/hourly case: apply bin filter for outliers detection
         else:
-            for name, df in self.plant.reanalysis.items():
+            for name in self._reanalysis:
                 x = valid_aggregate[name]
                 y = valid_aggregate["gross_energy_gwh"]
                 plant_capac = self.plant.metadata.capacity / 1000.0 * self.resample_hours
@@ -1383,25 +1475,26 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         ax.legend(**legend_kwargs)
         ax.set_xlabel("Wind speed (m/s)")
 
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
 
         fig.tight_layout()
         plt.show()
 
         if return_fig:
             return fig, ax
+        return None
 
     def plot_aggregate_plant_data_timeseries(
         self,
-        xlim: tuple[datetime.datetime, datetime.datetime] = (None, None),
-        ylim_energy: tuple[float, float] = (None, None),
-        ylim_loss: tuple[float, float] = (None, None),
+        xlim: tuple[datetime.datetime | None, datetime.datetime | None] = (None, None),
+        ylim_energy: tuple[float | None, float | None] = (None, None),
+        ylim_loss: tuple[float | None, float | None] = (None, None),
         return_fig: bool = False,
-        figure_kwargs: dict | None = None,
-        plot_kwargs: dict | None = None,
-        legend_kwargs: dict | None = None,
-    ):
+        figure_kwargs: _Kwargs | None = None,
+        plot_kwargs: _Kwargs | None = None,
+        legend_kwargs: _Kwargs | None = None,
+    ) -> None | tuple[Figure, tuple[Axes, Axes]]:
         """
         Plot timeseries of monthly/daily gross energy, availability and curtailment.
 
@@ -1430,7 +1523,8 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
                 If `return_fig` is True, then the figure and axes objects are returned for further
                 tinkering/saving.
         """
-        return plot.plot_plant_energy_losses_timeseries(
+        # arg-type: see ``plot_normalized_monthly_reanalysis_windspeed``
+        figure: None | tuple[Figure, tuple[Axes, Axes]] = plot.plot_plant_energy_losses_timeseries(
             data=self.aggregate,
             energy_col="gross_energy_gwh",
             loss_cols=["availability_pct", "curtailment_pct"],
@@ -1444,20 +1538,21 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             plot_kwargs=plot_kwargs,
             legend_kwargs=legend_kwargs,
         )
+        return figure
 
     def plot_result_aep_distributions(
         self,
-        xlim_aep: tuple[float, float] = (None, None),
-        xlim_availability: tuple[float, float] = (None, None),
-        xlim_curtail: tuple[float, float] = (None, None),
-        ylim_aep: tuple[float, float] = (None, None),
-        ylim_availability: tuple[float, float] = (None, None),
-        ylim_curtail: tuple[float, float] = (None, None),
+        xlim_aep: tuple[float | None, float | None] = (None, None),
+        xlim_availability: tuple[float | None, float | None] = (None, None),
+        xlim_curtail: tuple[float | None, float | None] = (None, None),
+        ylim_aep: tuple[float | None, float | None] = (None, None),
+        ylim_availability: tuple[float | None, float | None] = (None, None),
+        ylim_curtail: tuple[float | None, float | None] = (None, None),
         return_fig: bool = False,
-        figure_kwargs: dict | None = None,
-        plot_kwargs: dict | None = None,
-        annotate_kwargs: dict | None = None,
-    ) -> None | tuple[plt.Figure, plt.Axes]:
+        figure_kwargs: _Kwargs | None = None,
+        plot_kwargs: _Kwargs | None = None,
+        annotate_kwargs: _Kwargs | None = None,
+    ) -> None | tuple[Figure, plot.NDArrayAxes]:
         """
         Plot a distribution of AEP values from the Monte-Carlo OA method
 
@@ -1504,15 +1599,15 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         self,
         x: pd.Series,
         xlabel: str,
-        ylim: tuple[float, float] = (None, None),
+        ylim: tuple[float | None, float | None] = (None, None),
         with_points: bool = False,
         points_label: str = "Individual AEP Estimates",
         return_fig: bool = False,
-        figure_kwargs: dict | None = None,
-        plot_kwargs_box: dict | None = None,
-        plot_kwargs_points: dict | None = None,
-        legend_kwargs: dict | None = None,
-    ) -> None | tuple[plt.Figure, plt.Axes]:
+        figure_kwargs: _Kwargs | None = None,
+        plot_kwargs_box: _Kwargs | None = None,
+        plot_kwargs_points: _Kwargs | None = None,
+        legend_kwargs: _Kwargs | None = None,
+    ) -> None | tuple[Figure, Axes, dict[str, list[Any]]]:
         """Plot box plots of AEP results sliced by a specified Monte Carlo parameter
 
         Args:
@@ -1555,38 +1650,40 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         )
 
 
-__defaults_reanalysis_products = MonteCarloAEP.__attrs_attrs__.reanalysis_products.default
-__defaults_uncertainty_meter = MonteCarloAEP.__attrs_attrs__.uncertainty_meter.default
-__defaults_uncertainty_losses = MonteCarloAEP.__attrs_attrs__.uncertainty_losses.default
-__defaults_uncertainty_windiness = MonteCarloAEP.__attrs_attrs__.uncertainty_windiness.default
-__defaults_uncertainty_loss_max = MonteCarloAEP.__attrs_attrs__.uncertainty_loss_max.default
-__defaults_outlier_detection = MonteCarloAEP.__attrs_attrs__.outlier_detection.default
-__defaults_uncertainty_outlier = MonteCarloAEP.__attrs_attrs__.uncertainty_outlier.default
-__defaults_uncertainty_nan_energy = MonteCarloAEP.__attrs_attrs__.uncertainty_nan_energy.default
-__defaults_time_resolution = MonteCarloAEP.__attrs_attrs__.time_resolution.default
-__defaults_end_date_lt = MonteCarloAEP.__attrs_attrs__.end_date_lt.default
-__defaults_reg_model = MonteCarloAEP.__attrs_attrs__.reg_model.default
-__defaults_ml_setup_kwargs = MonteCarloAEP.__attrs_attrs__.ml_setup_kwargs.default
-__defaults_reg_temperature = MonteCarloAEP.__attrs_attrs__.reg_temperature.default
-__defaults_reg_wind_direction = MonteCarloAEP.__attrs_attrs__.reg_wind_direction.default
-__defaults_n_jobs = MonteCarloAEP.__attrs_attrs__.n_jobs.default
-__defaults_apply_iav = MonteCarloAEP.__attrs_attrs__.apply_iav.default
+__defaults_reanalysis_products = _default(MonteCarloAEP.__attrs_attrs__.reanalysis_products)
+__defaults_uncertainty_meter = _default(MonteCarloAEP.__attrs_attrs__.uncertainty_meter)
+__defaults_uncertainty_losses = _default(MonteCarloAEP.__attrs_attrs__.uncertainty_losses)
+__defaults_uncertainty_windiness = _default(MonteCarloAEP.__attrs_attrs__.uncertainty_windiness)
+__defaults_uncertainty_loss_max = _default(MonteCarloAEP.__attrs_attrs__.uncertainty_loss_max)
+__defaults_outlier_detection = _default(MonteCarloAEP.__attrs_attrs__.outlier_detection)
+__defaults_uncertainty_outlier = _default(MonteCarloAEP.__attrs_attrs__.uncertainty_outlier)
+__defaults_uncertainty_nan_energy = _default(MonteCarloAEP.__attrs_attrs__.uncertainty_nan_energy)
+__defaults_time_resolution = _default(MonteCarloAEP.__attrs_attrs__.time_resolution)
+__defaults_end_date_lt = _default(MonteCarloAEP.__attrs_attrs__.end_date_lt)
+__defaults_reg_model = _default(MonteCarloAEP.__attrs_attrs__.reg_model)
+__defaults_ml_setup_kwargs = _default(MonteCarloAEP.__attrs_attrs__.ml_setup_kwargs)
+__defaults_reg_temperature = _default(MonteCarloAEP.__attrs_attrs__.reg_temperature)
+__defaults_reg_wind_direction = _default(MonteCarloAEP.__attrs_attrs__.reg_wind_direction)
+__defaults_n_jobs = _default(MonteCarloAEP.__attrs_attrs__.n_jobs)
+__defaults_apply_iav = _default(MonteCarloAEP.__attrs_attrs__.apply_iav)
 
 
 def create_MonteCarloAEP(
     project: PlantData,
-    reanalysis_products: list[str] = __defaults_reanalysis_products,
+    reanalysis_products: list[str] | None = __defaults_reanalysis_products,
     uncertainty_meter: float = __defaults_uncertainty_meter,
     uncertainty_losses: float = __defaults_uncertainty_losses,
-    uncertainty_windiness: NDArrayFloat = __defaults_uncertainty_windiness,
-    uncertainty_loss_max: NDArrayFloat = __defaults_uncertainty_loss_max,
+    uncertainty_windiness: (
+        float | Sequence[float] | NDArrayFloat
+    ) = __defaults_uncertainty_windiness,
+    uncertainty_loss_max: float | Sequence[float] | NDArrayFloat = __defaults_uncertainty_loss_max,
     outlier_detection: bool = __defaults_outlier_detection,
-    uncertainty_outlier: NDArrayFloat = __defaults_uncertainty_outlier,
+    uncertainty_outlier: float | Sequence[float] | NDArrayFloat = __defaults_uncertainty_outlier,
     uncertainty_nan_energy: float = __defaults_uncertainty_nan_energy,
     time_resolution: str = __defaults_time_resolution,
-    end_date_lt: str | pd.Timestamp = __defaults_end_date_lt,
+    end_date_lt: str | pd.Timestamp | None = __defaults_end_date_lt,
     reg_model: str = __defaults_reg_model,
-    ml_setup_kwargs: dict = __defaults_ml_setup_kwargs,
+    ml_setup_kwargs: _Kwargs = __defaults_ml_setup_kwargs,
     reg_temperature: bool = __defaults_reg_temperature,
     reg_wind_direction: bool = __defaults_reg_wind_direction,
     n_jobs: int | None = __defaults_n_jobs,
