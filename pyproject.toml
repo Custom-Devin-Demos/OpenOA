@@ -80,7 +80,7 @@ develop = [
   "pytest>=9",
   "pytest-cov>=2.8.1",
   "mypy>=1.14",
-  "pandas-stubs>=2.2",
+  "pandas-stubs>=2.2,<3",
   "types-PyYAML",
   "types-pytz",
   "types-requests",
