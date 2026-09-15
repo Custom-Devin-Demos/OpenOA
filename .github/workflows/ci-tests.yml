@@ -44,7 +44,7 @@ jobs:
     - name: CLI smoke run for every analysis method
       run: |
         openoa list
-        for method in $(openoa list); do
+        for method in aep electrical_losses eya_gap_analysis turbine_long_term_gross_energy wake_losses yaw_misalignment; do
           openoa run "$method" --config "examples/configs/$method.yaml" --output-dir "cli-smoke/$method"
           test -s "cli-smoke/$method/${method}_results.json"
         done
