@@ -76,6 +76,12 @@ develop = [
   "flake8-docstrings",
   "pytest>=9",
   "pytest-cov>=2.8.1",
+  "mypy>=1.14",
+  "pandas-stubs>=2.2",
+  "types-PyYAML",
+  "types-pytz",
+  "types-requests",
+  "types-tabulate",
 ]
 docs = [
   "Sphinx>=5.0,!=7.2.0",
@@ -138,6 +144,48 @@ filterwarnings = [
   "ignore::DeprecationWarning:patsy.*:",
   "ignore::DeprecationWarning:pygam.*:",
 ]
+
+[tool.mypy]
+# `mypy --strict` is enforced file-by-file: every module listed in `files` must be clean, and
+# imports into modules not yet listed are followed silently so that the two sets can diverge
+# while the package is being annotated. Add a module to `files` once it passes.
+strict = true
+python_version = "3.10"
+follow_imports = "silent"
+warn_unreachable = true
+show_error_codes = true
+pretty = false
+files = [
+  "openoa/__init__.py",
+  "openoa/logging.py",
+  "openoa/cli.py",
+  "openoa/runners/__init__.py",
+  "openoa/schema/__init__.py",
+  "openoa/schema/schema.py",
+  "openoa/analysis/__init__.py",
+  "openoa/analysis/_analysis_validators.py",
+  "openoa/analysis/wake_losses.py",
+  "openoa/utils/met_data_processing.py",
+  "openoa/runners/wake_losses.py",
+]
+
+[[tool.mypy.overrides]]
+# Third-party scientific libraries without type stubs.
+module = [
+  "cdsapi.*",
+  "eia.*",
+  "entr.*",
+  "h5pyd.*",
+  "pygam.*",
+  "scipy.*",
+  "shapely.*",
+  "sklearn.*",
+  "statsmodels.*",
+  "tqdm.*",
+  "xarray.*",
+  "dateutil.*",
+]
+ignore_missing_imports = true
 
 [tool.black]
 # https://github.com/psf/black
