@@ -1261,18 +1261,15 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
                 axis=1,
             )
         if self.reg_wind_direction:
-            wd_aggregate = np.rad2deg(
-                np.pi
-                - np.arctan2(
-                    -long_term_temp[f"{self._run.reanalysis_product}_WMETR_HorWdSpdU"],
-                    long_term_temp[f"{self._run.reanalysis_product}_WMETR_HorWdSpdV"],
-                )
+            wd_rad: NDArrayFloat = np.pi - np.arctan2(
+                -long_term_temp[f"{self._run.reanalysis_product}_WMETR_HorWdSpdU"].to_numpy(),
+                long_term_temp[f"{self._run.reanalysis_product}_WMETR_HorWdSpdV"].to_numpy(),
             )  # Calculate wind direction
             long_term_reg_inputs = pd.concat(
                 [
                     long_term_reg_inputs,
-                    np.sin(np.deg2rad(wd_aggregate)),
-                    np.cos(np.deg2rad(wd_aggregate)),
+                    pd.Series(np.sin(wd_rad), index=long_term_temp.index),
+                    pd.Series(np.cos(wd_rad), index=long_term_temp.index),
                 ],
                 axis=1,
             )

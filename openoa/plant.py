@@ -1277,7 +1277,7 @@ class PlantData:
         """
         if self.asset is None:
             return cast(NDArray[Any], np.concatenate([self.turbine_ids, self.tower_ids]))
-        return cast(NDArray[Any], self.asset.index.values)
+        return np.asarray(self.asset.index)
 
     # NOTE: v2 AssetData methods
 
@@ -1548,18 +1548,19 @@ class PlantData:
         assert self.asset is not None
         distance = self.asset_distance_matrix.loc[ix, ix]
 
-        nearest_turbine = distance[ix_turb].values.argsort(axis=1)
+        nearest_turbine_ix = distance[ix_turb].values.argsort(axis=1)
         nearest_turbine = pd.DataFrame(
-            distance.columns.values[nearest_turbine], index=distance.index
+            distance.columns.values[nearest_turbine_ix], index=distance.index
         ).loc[ix, 0]
 
-        nearest_tower = distance[ix_tower].values.argsort(axis=1)
+        nearest_tower_ix = distance[ix_tower].values.argsort(axis=1)
         nearest_tower = pd.DataFrame(
-            distance.columns.values[nearest_tower], index=distance.index
+            distance.columns.values[nearest_tower_ix], index=distance.index
         ).loc[ix, 0]
 
-        self.asset.loc[ix, "nearest_turbine_id"] = nearest_turbine.values
-        self.asset.loc[ix, "nearest_tower_id"] = nearest_tower.values
+        asset_ix = list(ix)
+        self.asset.loc[asset_ix, "nearest_turbine_id"] = nearest_turbine.to_numpy()
+        self.asset.loc[asset_ix, "nearest_tower_id"] = nearest_tower.to_numpy()
 
     def nearest_turbine(self, asset_id: str) -> str:
         """Finds the nearest turbine to the provided `asset_id`.
