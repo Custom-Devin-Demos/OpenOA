@@ -164,6 +164,8 @@ files = [
   "openoa/schema/schema.py",
   "openoa/analysis/__init__.py",
   "openoa/analysis/_analysis_validators.py",
+  "openoa/analysis/wake_losses.py",
+  "openoa/utils/met_data_processing.py",
 ]
 
 [[tool.mypy.overrides]]
