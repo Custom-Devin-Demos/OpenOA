@@ -179,6 +179,9 @@ files = [
   "openoa/analysis/electrical_losses.py",
   "openoa/utils/plot.py",
   "openoa/runners/electrical_losses.py",
+  "openoa/analysis/yaw_misalignment.py",
+  "openoa/utils/filters.py",
+  "openoa/runners/yaw_misalignment.py",
 ]
 
 [[tool.mypy.overrides]]
