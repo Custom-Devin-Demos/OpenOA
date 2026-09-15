@@ -15,7 +15,7 @@ import pandas as pd
 import numpy.typing as npt
 
 NDArrayFloat = npt.NDArray[np.float64]
-ArrayInput: TypeAlias = "NDArrayFloat | pd.Series[float]"
+ArrayInput: TypeAlias = "NDArrayFloat | pd.Series[float] | pd.DataFrame"
 Bounds: TypeAlias = tuple[
     tuple[float, float],
     tuple[float, float],

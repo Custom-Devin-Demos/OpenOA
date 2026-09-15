@@ -241,7 +241,7 @@ class EYAGapAnalysis(FromDictMixin):
             plot_kwargs=plot_kwargs,
             figure_kwargs=figure_kwargs,
         )
-        return cast("tuple[Figure, Axes] | None", fig_ax)
+        return fig_ax
 
 
 def create_EYAGapAnalysis(

@@ -1092,7 +1092,7 @@ class PlantData:
 
             ws = col_map["WMETR_HorWdSpd"]
             if ws not in df and has_u_v:
-                df[ws] = met.compute_wind_speed(df[u], df[v]).values
+                df[ws] = np.asarray(met.compute_wind_speed(df[u], df[v]))
 
             wd = col_map["WMETR_HorWdDir"]
             if wd not in df and has_u_v:

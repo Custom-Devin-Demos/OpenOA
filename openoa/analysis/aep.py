@@ -1351,8 +1351,8 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             data=self._reanalysis,
             windspeed_col="ws_dens_corr",
             plant_por=(self.aggregate.index[0], self.aggregate.index[-1]),
-            xlim=xlim,  # type: ignore[arg-type]
-            ylim=ylim,  # type: ignore[arg-type]
+            xlim=xlim,
+            ylim=ylim,
             return_fig=return_fig,
             figure_kwargs=figure_kwargs,
             plot_kwargs=plot_kwargs,
@@ -1533,9 +1533,9 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
             loss_cols=["availability_pct", "curtailment_pct"],
             energy_label="Gross Energy (GWh/yr)",
             loss_labels=["Availability", "Curtailment"],
-            xlim=xlim,  # type: ignore[arg-type]
-            ylim_energy=ylim_energy,  # type: ignore[arg-type]
-            ylim_loss=ylim_loss,  # type: ignore[arg-type]
+            xlim=xlim,
+            ylim_energy=ylim_energy,
+            ylim_loss=ylim_loss,
             return_fig=return_fig,
             figure_kwargs=figure_kwargs,
             plot_kwargs=plot_kwargs,
@@ -1555,7 +1555,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         figure_kwargs: _Kwargs | None = None,
         plot_kwargs: _Kwargs | None = None,
         annotate_kwargs: _Kwargs | None = None,
-    ) -> None | tuple[Figure, Axes]:
+    ) -> None | tuple[Figure, plot.NDArrayAxes]:
         """
         Plot a distribution of AEP values from the Monte-Carlo OA method
 
@@ -1586,13 +1586,12 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         """
         plot_results = self.results.copy()
         plot_results[["avail_pct", "curt_pct"]] = plot_results[["avail_pct", "curt_pct"]] * 100
-        # arg-type: see ``plot_normalized_monthly_reanalysis_windspeed``
         return plot.plot_distributions(
             data=plot_results,
             which=["aep_GWh", "avail_pct", "curt_pct"],
             xlabels=["AEP (GWh/yr)", "Availability Loss (%)", "Curtailment Loss (%)"],
-            xlim=(xlim_aep, xlim_availability, xlim_curtail),  # type: ignore[arg-type]
-            ylim=(ylim_aep, ylim_availability, ylim_curtail),  # type: ignore[arg-type]
+            xlim=(xlim_aep, xlim_availability, xlim_curtail),
+            ylim=(ylim_aep, ylim_availability, ylim_curtail),
             return_fig=return_fig,
             figure_kwargs=figure_kwargs,
             plot_kwargs=plot_kwargs,
@@ -1611,7 +1610,7 @@ class MonteCarloAEP(FromDictMixin, ResetValuesMixin):
         plot_kwargs_box: _Kwargs | None = None,
         plot_kwargs_points: _Kwargs | None = None,
         legend_kwargs: _Kwargs | None = None,
-    ) -> None | tuple[Figure, Axes]:
+    ) -> None | tuple[Figure, Axes, dict[str, list[Any]]]:
         """Plot box plots of AEP results sliced by a specified Monte Carlo parameter
 
         Args:

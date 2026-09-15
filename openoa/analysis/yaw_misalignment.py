@@ -644,7 +644,7 @@ class StaticYawMisalignment(FromDictMixin, ResetValuesMixin):
         plot_kwargs_line: dict[str, Any] | None = None,
         plot_kwargs_fill: dict[str, Any] | None = None,
         legend_kwargs: dict[str, Any] | None = None,
-    ) -> dict[str, tuple[Figure, Axes | NDArrayObject]] | None:
+    ) -> dict[str, tuple[Figure, list[list[Axes]] | NDArrayObject]] | None:
         """Plots power performance vs. wind vane angle along with the best-fit cosine curve for
         each wind speed bin for each turbine specified. The mean wind vane angle and the wind vane
         angle where power performance is maximized are shown for each wind speed bin. Additionally,
@@ -697,7 +697,7 @@ class StaticYawMisalignment(FromDictMixin, ResetValuesMixin):
                     "turbines for which yaw misalginment detection was performed."
                 )
 
-        axes_dict: dict[str, tuple[Figure, Axes | NDArrayObject]] = {}
+        axes_dict: dict[str, tuple[Figure, list[list[Axes]] | NDArrayObject]] = {}
 
         for turbine_id in turbine_ids:
             i = all_turbine_ids.index(turbine_id)
@@ -733,7 +733,7 @@ class StaticYawMisalignment(FromDictMixin, ResetValuesMixin):
                 legend_kwargs,
             )
 
-            if return_fig:
+            if return_fig and return_vals is not None:
                 axes_dict[turbine_id] = return_vals
 
         if return_fig:

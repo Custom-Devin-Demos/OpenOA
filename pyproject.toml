@@ -61,6 +61,9 @@ classifiers = [  # https://pypi.org/classifiers/
     "Typing :: Typed",
 ]
 
+[project.scripts]
+openoa = "openoa.cli:main"
+
 [project.urls]
 source = "https://github.com/NREL/OpenOA"
 documentation = "https://openoa.readthedocs.io/"

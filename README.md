@@ -212,6 +212,51 @@ jupyter lab  # "jupyter notebook" is also ok if that's your preference
 Open the URL printed to your command prompt in your favorite browser. Once Jupyter is open, navigate
 to the "examples" directory in the file explorer and open an example notebook.
 
+### Headless CLI
+
+Every analysis method can be run unattended (e.g. from a scheduled fleet job) through the `openoa`
+console script, which is installed with the package:
+
+```bash
+openoa list                                   # available methods
+openoa run <method> --config <config.yaml> [--output-dir <dir>]
+```
+
+Methods: `aep`, `electrical_losses`, `eya_gap_analysis`, `turbine_long_term_gross_energy`,
+`wake_losses`, `yaw_misalignment`.
+
+A config file has three sections. `plant` either points at the data files for a
+`PlantData` object (`metadata`, `scada`, `meter`, `tower`, `status`, `curtail`, `asset`,
+`reanalysis`) or names a loader callable; `seed` fixes `random`/`numpy` for reproducible Monte
+Carlo results; and `analysis` holds the constructor arguments of the analysis class plus a `run`
+mapping for its `run()` arguments. Each method's `analysis` section is validated against a typed
+schema before any data is loaded, and unknown keys are rejected. Relative paths resolve against
+the config file's directory.
+
+```yaml
+seed: 42
+plant:
+  loader: examples.project_ENGIE:prepare
+  loader_kwargs:
+    path: ../data/la_haute_borne
+analysis:
+  reanalysis_products: [merra2, era5]
+  time_resolution: MS
+  run:
+    num_sim: 20
+```
+
+Results are written to `<output-dir>/<method>_results.json` and echoed to stdout. Ready-to-run
+configs for the bundled La Haute Borne data live in `examples/configs/`, e.g.:
+
+```bash
+openoa run aep --config examples/configs/aep.yaml --output-dir /tmp/openoa_aep
+```
+
+The same command is executed for every method in CI, alongside `mypy --strict` for the typed
+modules listed under `[tool.mypy]` in `pyproject.toml` and deterministic CLI regression tests in
+`test/regression/test_cli_*.py`.
+
 ### Development
 
 Please see the developer section of the contributing guide [here](contributing.md), or on the
