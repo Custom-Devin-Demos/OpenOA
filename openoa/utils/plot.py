@@ -6,6 +6,7 @@ This module provides helpful functions for creating various plots
 from __future__ import annotations
 
 import datetime
+from typing import Any, Callable, cast
 
 import numpy as np
 import pandas as pd
@@ -16,11 +17,18 @@ from pyproj import Transformer
 from bokeh.models import WMTSTileSource, ColumnDataSource
 from bokeh.palettes import Category10, viridis
 from bokeh.plotting import figure
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.ticker import StrMethodFormatter
 
-from openoa import PlantData
-
 NDArrayFloat = npt.NDArray[np.float64]
+# Arrays of ``Axes`` returned by ``plt.subplots``; numpy types object arrays as ``np.object_``.
+NDArrayAxes = npt.NDArray[np.object_]
+# User-supplied keyword arguments forwarded verbatim to matplotlib/bokeh, which accept arbitrary
+# option values, so the value type cannot be narrower than ``Any``.
+KwargsDict = dict[str, Any]
+Limits = tuple[float | None, float | None]
+DatetimeLimits = tuple[datetime.datetime | None, datetime.datetime | None]
 
 
 plt.close("all")
@@ -39,6 +47,12 @@ def set_styling() -> None:
 
 
 set_styling()
+
+
+def set_datetime_xlim(ax: Axes, xlim: DatetimeLimits) -> None:
+    """Sets the x-axis limits of ``ax`` from a tuple of (optional) datetimes."""
+    # matplotlib converts datetimes through its unit converters, but the stubs only declare floats.
+    ax.set_xlim(*xlim)  # type: ignore[arg-type]
 
 
 def map_wgs84_to_cartesian(
@@ -96,7 +110,7 @@ def map_wgs84_to_cartesian(
     return x, y
 
 
-def luminance(rgb: tuple[int, int, int]):
+def luminance(rgb: tuple[int, int, int] | tuple[float, float, float]) -> float:
     """Calculates the brightness of an rgb 255 color. See https://en.wikipedia.org/wiki/Relative_luminance
 
     Args:
@@ -123,7 +137,7 @@ def luminance(rgb: tuple[int, int, int]):
     return luminance
 
 
-def color_to_rgb(color: str | tuple[int, int, int]):
+def color_to_rgb(color: str | tuple[int, int, int] | tuple[float, float, float]) -> tuple[int, ...]:
     """Converts named colors, hex and normalised RGB to 255 RGB values
 
     Args:
@@ -148,24 +162,22 @@ def color_to_rgb(color: str | tuple[int, int, int]):
 
     if isinstance(color, tuple):
         if max(color) > 1:
-            color = tuple([i / 255 for i in color])
+            color = (color[0] / 255, color[1] / 255, color[2] / 255)
 
     rgb = mpl.colors.to_rgb(color)
 
-    rgb = tuple([int(i * 255) for i in rgb])
-
-    return rgb
+    return tuple([int(i * 255) for i in rgb])
 
 
 def plot_windfarm(
-    asset_df,
-    tile_name="OpenMap",
-    plot_width=800,
-    plot_height=800,
-    marker_size=14,
-    figure_kwargs={},
-    marker_kwargs={},
-):
+    asset_df: pd.DataFrame,
+    tile_name: str = "OpenMap",
+    plot_width: int = 800,
+    plot_height: int = 800,
+    marker_size: int = 14,
+    figure_kwargs: KwargsDict | None = None,
+    marker_kwargs: KwargsDict | None = None,
+) -> figure:
     """Plot the windfarm spatially on a map using the Bokeh plotting libaray.
 
     Args:
@@ -219,16 +231,17 @@ def plot_windfarm(
     asset_df["coordinates"] = tuple(zip(asset_df["latitude"], asset_df["longitude"]))
 
     # Define default and then update figure and marker options based on kwargs
-    figure_options = {
+    figure_options: KwargsDict = {
         "tools": "save,hover,pan,wheel_zoom,reset,help",
         "x_axis_label": "Longitude",
         "y_axis_label": "Latitude",
         "match_aspect": True,
         "tooltips": [("asset_id", "@asset_id"), ("type", "@type"), ("(Lat,Lon)", "@coordinates")],
     }
-    figure_options.update(figure_kwargs)
+    if figure_kwargs is not None:
+        figure_options.update(figure_kwargs)
 
-    marker_options = {
+    marker_options: KwargsDict = {
         "marker": "circle_y",
         "line_width": 1,
         "alpha": 0.8,
@@ -236,7 +249,8 @@ def plot_windfarm(
         "line_color": "auto_line_color",
         "legend_group": "type",
     }
-    marker_options.update(marker_kwargs)
+    if marker_kwargs is not None:
+        marker_options.update(marker_kwargs)
 
     # Create an appropriate fill color map and contrasting line color
     if marker_options["fill_color"] == "auto_fill_color":
@@ -245,7 +259,7 @@ def plot_windfarm(
         asset_df = asset_df.sort_values(color_grouping)
 
         if len(set(asset_df[color_grouping])) <= 10:
-            color_palette = list(Category10[10])
+            color_palette: list[str] | tuple[str, ...] = list(Category10[10])
         else:
             color_palette = viridis(len(set(asset_df[color_grouping])))
 
@@ -273,7 +287,8 @@ def plot_windfarm(
     source = ColumnDataSource(asset_df.drop(columns=["geometry"]))
 
     # Create a bokeh figure with tiles
-    plot_map = figure(
+    # bokeh's ``figure`` accepts axis-type options via **kwargs that its stubs do not declare.
+    plot_map = figure(  # type: ignore[call-arg]
         width=plot_width,
         height=plot_height,
         x_axis_type="mercator",
@@ -295,14 +310,14 @@ def plot_by_id(
     x_axis: str,
     y_axis: str,
     max_cols: int = 4,
-    xlim: tuple[float, float] = (None, None),
-    ylim: tuple[float, float] = (None, None),
+    xlim: Limits = (None, None),
+    ylim: Limits = (None, None),
     xlabel: str | None = None,
     ylabel: str | None = None,
     return_fig: bool = False,
-    figure_kwargs: dict | None = None,
-    plot_kwargs: dict | None = None,
-) -> None:
+    figure_kwargs: KwargsDict | None = None,
+    plot_kwargs: KwargsDict | None = None,
+) -> None | tuple[Figure, NDArrayAxes]:
     """Function to plot any two fields against each other in a dataframe with unique plots for each
     asset_id.
 
@@ -366,7 +381,10 @@ def plot_by_id(
     plot_kwargs.setdefault("s", 5)
 
     # Create the plot
+    fig: Figure
+    axes_list: NDArrayAxes
     fig, axes_list = plt.subplots(num_rows, max_cols, sharex=True, sharey=True, **figure_kwargs)
+    ax: Axes
     for i, (t_id, ax) in enumerate(zip(id_arrary, axes_list.flatten())):
         scada = df.loc[t_id]
         ax.scatter(scada[x_axis], scada[y_axis], **plot_kwargs)
@@ -379,8 +397,8 @@ def plot_by_id(
         if i % max_cols == 0:
             ax.set_ylabel(ylabel)
 
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
 
     # Delete the extra axes
     num_axes = axes_list.size
@@ -393,9 +411,12 @@ def plot_by_id(
 
     if return_fig:
         return fig, axes_list
+    return None
 
 
-def column_histograms(df: pd.DataFrame, columns: list = None, return_fig: bool = False):
+def column_histograms(
+    df: pd.DataFrame, columns: list[str] | None = None, return_fig: bool = False
+) -> None | tuple[Figure, NDArrayAxes]:
     """Produces a histogram plot for each numeric column in :py:attr:`df`.
 
     Args:
@@ -406,15 +427,18 @@ def column_histograms(df: pd.DataFrame, columns: list = None, return_fig: bool =
     Returns:
         (None)
     """
-    df = df.select_dtypes((int, float)).copy()
+    df = df.select_dtypes([int, float]).copy()
     columns = df.columns.tolist() if columns is None else columns
     num_cols = len(columns)
     max_cols = 3
     num_rows = int(np.ceil(num_cols / max_cols))
 
+    fig: Figure
+    axes_list: NDArrayAxes
     fig, axes_list = plt.subplots(num_rows, max_cols, figsize=(15, num_rows * 5))
+    ax: Axes
     for i, (col, ax) in enumerate(zip(columns, axes_list.flatten())):
-        data = df.loc[:, col].dropna().values
+        data = df.loc[:, col].dropna().to_numpy()
         ax.hist(data, 40)
         ax.set_title(col)
 
@@ -432,21 +456,22 @@ def column_histograms(df: pd.DataFrame, columns: list = None, return_fig: bool =
     plt.show()
     if return_fig:
         return fig, axes_list
+    return None
 
 
 def plot_power_curve(
     wind_speed: pd.Series,
     power: pd.Series,
-    flag: np.ndarray | pd.Series,
-    flag_labels: tuple[str, str] = ("Flagged Readings", "Power Curve"),
-    xlim: tuple[float, float] = (None, None),
-    ylim: tuple[float, float] = (None, None),
+    flag: npt.NDArray[np.bool_] | pd.Series,
+    flag_labels: tuple[str, str] | None = ("Flagged Readings", "Power Curve"),
+    xlim: Limits = (None, None),
+    ylim: Limits = (None, None),
     legend: bool = False,
     return_fig: bool = False,
-    figure_kwargs: dict | None = None,
-    legend_kwargs: dict | None = None,
-    scatter_kwargs: dict | None = None,
-) -> None | tuple[plt.Figure, plt.Axes]:
+    figure_kwargs: KwargsDict | None = None,
+    legend_kwargs: KwargsDict | None = None,
+    scatter_kwargs: KwargsDict | None = None,
+) -> None | tuple[Figure, Axes]:
     """Plots the individual points on a power curve, with an optional :py:attr:`flag` filtering for
     singling out readings in the figure. If `flag` is all false values then no overlaid flagge
     scatter points will be created.
@@ -507,14 +532,15 @@ def plot_power_curve(
     ax.set_xlabel("Wind Speed (m/s)")
     ax.set_ylabel("Power (kW)")
 
-    ax.set_xlim(xlim)
-    ax.set_ylim(ylim)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
 
     if return_fig:
         return fig, ax
 
     fig.tight_layout()
     plt.show()
+    return None
 
 
 def plot_monthly_reanalysis_windspeed(
@@ -522,13 +548,13 @@ def plot_monthly_reanalysis_windspeed(
     windspeed_col: str,
     plant_por: tuple[datetime.datetime, datetime.datetime],
     normalize: bool = True,
-    xlim: tuple[datetime.datetime, datetime.datetime] = (None, None),
-    ylim: tuple[float, float] = (None, None),
+    xlim: DatetimeLimits = (None, None),
+    ylim: Limits = (None, None),
     return_fig: bool = False,
-    figure_kwargs: dict | None = None,
-    plot_kwargs: dict | None = None,
-    legend_kwargs: dict | None = None,
-) -> None | tuple[plt.Figure, plt.Axes]:
+    figure_kwargs: KwargsDict | None = None,
+    plot_kwargs: KwargsDict | None = None,
+    legend_kwargs: KwargsDict | None = None,
+) -> None | tuple[Figure, Axes]:
     """Make a plot of the normalized annual average wind speeds from reanalysis data to show general
     trends for each, and highlighting the period of record for the plant data.
 
@@ -556,7 +582,12 @@ def plot_monthly_reanalysis_windspeed(
             True, then the figure and axes objects are returned for further tinkering/saving.
     """
     # Define parameters needed for plotting
-    min_val, max_val = (np.inf, -np.inf) if ylim == (None, None) else ylim
+    min_val: float
+    max_val: float
+    if ylim[0] is None or ylim[1] is None:
+        min_val, max_val = np.inf, -np.inf
+    else:
+        min_val, max_val = ylim[0], ylim[1]
 
     if figure_kwargs is None:
         figure_kwargs = {}
@@ -570,6 +601,7 @@ def plot_monthly_reanalysis_windspeed(
     fig = plt.figure(**figure_kwargs)
     ax = fig.add_subplot(111)
 
+    ws: pd.DataFrame | pd.Series
     for name, df in data.items():
         # Compute the rolling mean and normalize it over a 12 month average
         ws = df.resample("MS")[windspeed_col].mean().to_frame().rolling(12).mean()
@@ -577,26 +609,26 @@ def plot_monthly_reanalysis_windspeed(
             ws = ws[windspeed_col] / ws[windspeed_col].mean()
 
         # Update the min and max values
-        min_val = min(min_val, ws.min())
-        max_val = max(max_val, ws.max())
+        min_val = min(min_val, float(ws.min()))
+        max_val = max(max_val, float(ws.max()))
 
         ax.plot(ws, label=name, **plot_kwargs)
 
     # Plot a vertical line at y = 1
-    _xlims = (ws.index[0], ws.index[-1]) if xlim is None else xlim
-    ax.hlines(1, *_xlims, colors="k", linestyles="--")
+    # matplotlib converts datetimes through its unit converters, but the stubs only declare floats.
+    ax.hlines(1, *xlim, colors="k", linestyles="--")  # type: ignore[arg-type]
 
     # Fill in the period of record
     ax.fill_between(
-        plant_por,
+        plant_por,  # type: ignore[arg-type]
         [min_val, min_val],
         [max_val, max_val],
         alpha=0.1,
         label="Plant POR",
     )
 
-    ax.set_xlim(xlim)
-    ax.set_ylim(ylim)
+    set_datetime_xlim(ax, xlim)
+    ax.set_ylim(*ylim)
 
     ax.set_xlabel("Year")
     ax.set_ylabel("Normalized wind speed")
@@ -607,6 +639,7 @@ def plot_monthly_reanalysis_windspeed(
 
     if return_fig:
         return fig, ax
+    return None
 
 
 def plot_plant_energy_losses_timeseries(
@@ -615,14 +648,14 @@ def plot_plant_energy_losses_timeseries(
     loss_cols: list[str],
     energy_label: str,
     loss_labels: list[str],
-    xlim: tuple[datetime.datetime, datetime.datetime] = (None, None),
-    ylim_energy: tuple[float, float] = (None, None),
-    ylim_loss: tuple[float, float] = (None, None),
+    xlim: DatetimeLimits = (None, None),
+    ylim_energy: Limits = (None, None),
+    ylim_loss: Limits = (None, None),
     return_fig: bool = False,
-    figure_kwargs: dict | None = None,
-    plot_kwargs: dict | None = None,
-    legend_kwargs: dict | None = None,
-):
+    figure_kwargs: KwargsDict | None = None,
+    plot_kwargs: KwargsDict | None = None,
+    legend_kwargs: KwargsDict | None = None,
+) -> None | tuple[Figure, tuple[Axes, Axes]]:
     """
     Plot timeseries of energy, and the loss categories of interest.
 
@@ -679,29 +712,30 @@ def plot_plant_energy_losses_timeseries(
     for ax in axes:
         ax.legend(**legend_kwargs)
 
-    ax1.set_xlim(xlim)
-    ax1.set_ylim(ylim_energy)
-    ax2.set_ylim(ylim_loss)
+    set_datetime_xlim(ax1, xlim)
+    ax1.set_ylim(*ylim_energy)
+    ax2.set_ylim(*ylim_loss)
 
     fig.tight_layout()
     plt.show()
 
     if return_fig:
         return fig, axes
+    return None
 
 
 def plot_distributions(
     data: pd.DataFrame,
     which: list[str],
     xlabels: list[str],
-    xlim: tuple[tuple[float, float], ...] = None,
-    ylim: tuple[tuple[float, float], ...] = None,
+    xlim: tuple[Limits, ...] | None = None,
+    ylim: tuple[Limits, ...] | None = None,
     return_fig: bool = False,
-    figure_kwargs: dict | None = None,
-    plot_kwargs: dict | None = None,
-    annotate_kwargs: dict | None = None,
+    figure_kwargs: KwargsDict | None = None,
+    plot_kwargs: KwargsDict | None = None,
+    annotate_kwargs: KwargsDict | None = None,
     title: str | None = None,
-) -> None | tuple[plt.Figure, plt.Axes]:
+) -> None | tuple[Figure, NDArrayAxes]:
     """
     Plot a distribution of AEP values from the Monte-Carlo OA method
 
@@ -750,12 +784,13 @@ def plot_distributions(
     figure_kwargs.setdefault("figsize", (14, 12))
     figure_kwargs.setdefault("dpi", 200)
     fig = plt.figure(**figure_kwargs)
-    axes = fig.subplots(2, 2, gridspec_kw=dict(wspace=0.1, hspace=0.2))
+    axes: NDArrayAxes = fig.subplots(2, 2, gridspec_kw=dict(wspace=0.1, hspace=0.2))
 
+    ax: Axes
     for ax, col, label, _xlim, _ylim in zip(axes.flatten(), which, xlabels, xlim, ylim):
-        vals = data[col].values
+        vals = data[col].to_numpy()
         u_vals = vals.mean()
-        ax.hist(vals, 40, density=1, **plot_kwargs)
+        ax.hist(vals, 40, density=True, **plot_kwargs)
         ax.annotate(
             f"Mean = {u_vals:.1f}",
             (0.05, 0.9),
@@ -770,8 +805,8 @@ def plot_distributions(
             **annotate_kwargs,
         )
         ax.set_xlabel(label)
-        ax.set_xlim(_xlim)
-        ax.set_ylim(_ylim)
+        ax.set_xlim(*_xlim)
+        ax.set_ylim(*_ylim)
 
     if title:
         plt.suptitle(title)
@@ -786,9 +821,12 @@ def plot_distributions(
 
     if return_fig:
         return fig, axes
+    return None
 
 
-def _generate_swarm_values(y, n_bins=None, width: float = 0.5):
+def _generate_swarm_values(
+    y: pd.Series, n_bins: int | None = None, width: float = 0.5
+) -> NDArrayFloat:
     """Create the x-coordiantes for `y` so that plotting each value in the distribution of
     :py:attr:`y` appears like that of a `seaborn.swarmplot` without requiring an additional dependency.
 
@@ -807,15 +845,15 @@ def _generate_swarm_values(y, n_bins=None, width: float = 0.5):
         n_bins = y.size // 6
 
     # Get the upper bound of each bin
-    x = np.zeros_like(y)
+    x: NDArrayFloat = np.zeros_like(y)
     y_min, y_max = y.min(), y.max()
     dy = (y_max - y_min) / n_bins
     y_bins = np.linspace(y_min + dy, y_max - dy, n_bins - 1)
 
     # Divide the indices into their appropriate bins
-    i = np.arange(y.size)
-    ix_bin_groups = [0] * n_bins
-    y_bin_groups = [0] * n_bins
+    i: npt.NDArray[np.int_] = np.arange(y.size)
+    ix_bin_groups: list[npt.NDArray[np.int_]] = [np.zeros(0, dtype=int)] * n_bins
+    y_bin_groups: list[pd.Series] = [pd.Series(dtype=float)] * n_bins
     n_max = 0
     for j, y_bin in enumerate(y_bins):
         ix_bin = y <= y_bin
@@ -829,12 +867,12 @@ def _generate_swarm_values(y, n_bins=None, width: float = 0.5):
 
     # Assign the x indices in alternating fashion for each bin to ensure the x values are roughly symmetric
     dx = 1 / (n_max // 2)
-    for i, vals in zip(ix_bin_groups, y_bin_groups):
-        if len(i) > 1:
-            j = len(i) % 2
-            i = i[np.argsort(vals)]
-            a = i[j::2]
-            b = i[j + 1 :: 2]
+    for ix, vals in zip(ix_bin_groups, y_bin_groups):
+        if len(ix) > 1:
+            j = len(ix) % 2
+            ix = ix[np.argsort(vals)]
+            a = ix[j::2]
+            b = ix[j + 1 :: 2]
             x[a] = (0.5 + j / 3 + np.arange(len(b))) * dx * width
             x[b] = (0.5 + j / 3 + np.arange(len(b))) * -dx * width
 
@@ -846,15 +884,15 @@ def plot_boxplot(
     y: pd.Series,
     xlabel: str,
     ylabel: str,
-    ylim: tuple[float | None, float | None] = (None, None),
+    ylim: Limits = (None, None),
     with_points: bool = False,
     points_label: str | None = None,
     return_fig: bool = False,
-    figure_kwargs: dict | None = None,
-    plot_kwargs_box: dict | None = None,
-    plot_kwargs_points: dict | None = None,
-    legend_kwargs: dict | None = None,
-) -> None | tuple[plt.Figure, plt.Axes]:
+    figure_kwargs: KwargsDict | None = None,
+    plot_kwargs_box: KwargsDict | None = None,
+    plot_kwargs_points: KwargsDict | None = None,
+    legend_kwargs: KwargsDict | None = None,
+) -> None | tuple[Figure, Axes, dict[str, list[Any]]]:
     """Plot box plots of AEP results sliced by a specified Monte Carlo parameter
 
     Args:
@@ -916,6 +954,7 @@ def plot_boxplot(
             label = points_label if x_start == width.size - 1 else None
             ax.scatter(_x, _y, zorder=0, label=label, **plot_kwargs_points)
 
+    handles: list[Any]
     handles, labels = [box_data["fliers"][0]], ["Outliers"]
     _handles, _labels = ax.get_legend_handles_labels()
     handles.extend(_handles)
@@ -925,24 +964,25 @@ def plot_boxplot(
     ax.set_ylabel(ylabel)
     ax.set_xlabel(xlabel)
 
-    ax.set_ylim(ylim)
+    ax.set_ylim(*ylim)
 
     fig.tight_layout()
     plt.show()
 
     if return_fig:
         return fig, ax, box_data
+    return None
 
 
 def plot_waterfall(
     data: list[float] | NDArrayFloat,
     index: list[str],
     ylabel: str | None = None,
-    ylim: tuple[float, float] = (None, None),
+    ylim: Limits = (None, None),
     return_fig: bool = False,
-    plot_kwargs: dict | None = None,
-    figure_kwargs: dict | None = None,
-) -> None | tuple:
+    plot_kwargs: KwargsDict | None = None,
+    figure_kwargs: KwargsDict | None = None,
+) -> None | tuple[Figure, Axes]:
     """
     Produce a waterfall plot showing the progression from the EYA estimates to the calculated OA
     estimates of AEP.
@@ -1016,31 +1056,33 @@ def plot_waterfall(
     ax.set_xticks(x)
     ax.set_xticklabels(index)
 
-    ax.set_ylim(ylim)
-    ax.set_ylabel(ylabel)
+    ax.set_ylim(*ylim)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
 
     fig.tight_layout()
     plt.show()
     if return_fig:
         return fig, ax
+    return None
 
 
 def plot_power_curves(
     data: dict[str, pd.DataFrame],
     power_col: str,
     windspeed_col: str,
-    flag_col: str = None,
+    flag_col: str | None = None,
     turbines: list[str] | None = None,
-    flag_labels: tuple[str, str] = ("Flagged Readings", "Power Curve"),
+    flag_labels: tuple[str, str] | None = ("Flagged Readings", "Power Curve"),
     max_cols: int = 3,
-    xlim: tuple[float, float] = (None, None),
-    ylim: tuple[float, float] = (None, None),
+    xlim: Limits = (None, None),
+    ylim: Limits = (None, None),
     legend: bool = False,
     return_fig: bool = False,
-    figure_kwargs: dict | None = None,
-    legend_kwargs: dict | None = None,
-    plot_kwargs: dict | None = None,
-):
+    figure_kwargs: KwargsDict | None = None,
+    legend_kwargs: KwargsDict | None = None,
+    plot_kwargs: KwargsDict | None = None,
+) -> None | tuple[Figure, Axes]:
     """Plots a series of power curves for a dictionary of turbine data, allowing for an optional
     filtering for singling out readings in the figure.
 
@@ -1090,8 +1132,11 @@ def plot_power_curves(
 
     figure_kwargs.setdefault("dpi", 200)
     figure_kwargs.setdefault("figsize", (15, num_rows * 5))
+    fig: Figure
+    axes_list: NDArrayAxes
     fig, axes_list = plt.subplots(num_rows, max_cols, **figure_kwargs)
 
+    ax: Axes
     for i, (t, ax) in enumerate(zip(turbines, axes_list.flatten())):
         plot_data = data[t]
 
@@ -1104,8 +1149,8 @@ def plot_power_curves(
             ax.scatter(plot_data[windspeed_col], plot_data[power_col], label=label, **plot_kwargs)
 
         ax.set_title(t)
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
 
         ax.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
 
@@ -1127,25 +1172,26 @@ def plot_power_curves(
     plt.show()
     if return_fig:
         return fig, ax
+    return None
 
 
 def plot_wake_losses(
     bins: NDArrayFloat,
     efficiency_data_por: NDArrayFloat,
     efficiency_data_lt: NDArrayFloat,
-    energy_data_por: NDArrayFloat = None,
-    energy_data_lt: NDArrayFloat = None,
+    energy_data_por: NDArrayFloat | None = None,
+    energy_data_lt: NDArrayFloat | None = None,
     bin_axis_label: str = "wd",
-    turbine_id: str = None,
-    xlim: tuple[float, float] = (None, None),
-    ylim_efficiency: tuple[float, float] = (None, None),
-    ylim_energy: tuple[float, float] = (None, None),
+    turbine_id: str | None = None,
+    xlim: Limits = (None, None),
+    ylim_efficiency: Limits = (None, None),
+    ylim_energy: Limits = (None, None),
     return_fig: bool = False,
-    figure_kwargs: dict | None = None,
-    plot_kwargs_line: dict | None = None,
-    plot_kwargs_fill: dict | None = None,
-    legend_kwargs: dict | None = None,
-):
+    figure_kwargs: KwargsDict | None = None,
+    plot_kwargs_line: KwargsDict | None = None,
+    plot_kwargs_fill: KwargsDict | None = None,
+    legend_kwargs: KwargsDict | None = None,
+) -> None | tuple[Figure, Axes] | tuple[Figure, tuple[Axes, Axes]]:
     """Plots wake losses in the form of wind farm efficiency as well as normalized wind plant energy
     production for both the period of record and with the long-term correction as a function of either
     wind direction or wind speed. If the data arguments contain two dimensions, 95% confidence intervals
@@ -1218,9 +1264,6 @@ def plot_wake_losses(
     if xlim == (None, None):
         xlim = (bins[0], bins[-1])
 
-    if figure_kwargs is None:
-        figure_kwargs = {}
-
     # determine if confidence intervals should be plotted (i.e., UQ) based on dimension of data
     if (efficiency_data_por.ndim == 1) & (efficiency_data_lt.ndim == 1):
         UQ = False
@@ -1232,7 +1275,7 @@ def plot_wake_losses(
         )
 
     # determine if normalized energy should be plotted
-    if (energy_data_por is not None) & (energy_data_lt is not None):
+    if (energy_data_por is not None) and (energy_data_lt is not None):
         if (not UQ) & (energy_data_por.ndim == 1) & (energy_data_lt.ndim == 1):
             plot_norm_energy = True
         elif UQ & (energy_data_por.ndim == 2) & (energy_data_lt.ndim == 2):
@@ -1242,25 +1285,26 @@ def plot_wake_losses(
                 "The inputs `energy_data_por` and `energy_data_lt` must both have the same dimensions"
                 "as `efficiency_data_por` and `efficiency_data_lt`."
             )
-    elif (energy_data_por is None) & (energy_data_lt is None):
+    elif (energy_data_por is None) and (energy_data_lt is None):
         plot_norm_energy = False
     else:
         raise TypeError(
             "The inputs `energy_data_por` and `energy_data_lt` must either both be provided or both be None."
         )
 
+    ax2: Axes | None = None
     if plot_norm_energy:
         figure_kwargs.setdefault("figsize", (9, 9.1))
         fig = plt.figure(**figure_kwargs)
         ax1 = fig.add_subplot(211)
         ax2 = fig.add_subplot(212, sharex=ax1)
-        axs = (ax1, ax2)
+        axs = [ax1, ax2]
     else:
         figure_kwargs.setdefault("figsize", (9, 5))
         fig = plt.figure(**figure_kwargs)
         ax1 = fig.add_subplot(111)
         axs = [ax1]
-    axs[0].plot(xlim, [1, 1], "k", linewidth=1.5)
+    axs[0].plot(np.asarray(xlim), [1, 1], "k", linewidth=1.5)
 
     if UQ:
         axs[0].plot(
@@ -1295,7 +1339,7 @@ def plot_wake_losses(
             **plot_kwargs_fill,
         )
 
-        if plot_norm_energy:
+        if energy_data_por is not None and energy_data_lt is not None:
             axs[1].plot(
                 bins,
                 np.mean(energy_data_por, axis=0),
@@ -1345,7 +1389,7 @@ def plot_wake_losses(
             **plot_kwargs_line,
         )
 
-        if plot_norm_energy:
+        if energy_data_por is not None and energy_data_lt is not None:
             axs[1].plot(
                 bins,
                 energy_data_por,
@@ -1362,8 +1406,8 @@ def plot_wake_losses(
                 **plot_kwargs_line,
             )
 
-    axs[0].set_xlim(xlim)
-    axs[0].set_ylim(ylim_efficiency)
+    axs[0].set_xlim(*xlim)
+    axs[0].set_ylim(*ylim_efficiency)
     axs[len(axs) - 1].set_xlabel(bin_axis_label)
     axs[0].legend(**legend_kwargs)
     if turbine_id is not None:
@@ -1372,18 +1416,19 @@ def plot_wake_losses(
     else:
         axs[0].set_ylabel("Wind Plant Efficiency (-)")
 
-    if plot_norm_energy:
-        axs[1].set_ylim(ylim_energy)
-        axs[1].legend(**legend_kwargs)
-        axs[1].set_ylabel("Normalized Wind Plant\nEnergy Production (-)")
+    if ax2 is not None:
+        ax2.set_ylim(*ylim_energy)
+        ax2.legend(**legend_kwargs)
+        ax2.set_ylabel("Normalized Wind Plant\nEnergy Production (-)")
 
         plt.tight_layout()
         if return_fig:
-            return fig, axs
+            return fig, (ax1, ax2)
     else:
         plt.tight_layout()
         if return_fig:
             return fig, ax1
+    return None
 
 
 def plot_yaw_misalignment(
@@ -1395,15 +1440,15 @@ def plot_yaw_misalignment(
     yaw_misalignment_ws: NDArrayFloat,
     turbine_id: str,
     power_performance_label: str = "Normalized Cp (-)",
-    xlim: tuple[float, float] = (None, None),
-    ylim: tuple[float, float] = (None, None),
+    xlim: Limits = (None, None),
+    ylim: Limits = (None, None),
     return_fig: bool = False,
-    figure_kwargs: dict | None = None,
-    plot_kwargs_curve: dict | None = None,
-    plot_kwargs_line: dict | None = None,
-    plot_kwargs_fill: dict | None = None,
-    legend_kwargs: dict | None = None,
-):
+    figure_kwargs: KwargsDict | None = None,
+    plot_kwargs_curve: KwargsDict | None = None,
+    plot_kwargs_line: KwargsDict | None = None,
+    plot_kwargs_fill: KwargsDict | None = None,
+    legend_kwargs: KwargsDict | None = None,
+) -> None | tuple[Figure, list[list[Axes]] | NDArrayAxes]:
     """Plots power performance vs. wind vane angle along with the best-fit cosine curve for each
     wind speed bin for a single turbine. The mean wind vane angle and the wind vane angle where
     power performance is maximized are shown for each wind speed bin. Additionally, the yaw
@@ -1461,7 +1506,12 @@ def plot_yaw_misalignment(
             misalignment plots are returned for further tinkering/saving.
     """
 
-    from openoa.analysis.yaw_misalignment import cos_curve
+    from openoa.analysis.yaw_misalignment import cos_curve as _cos_curve
+
+    # The curve-fit helper lives in an untyped module; declare its signature at the call site.
+    cos_curve = cast(
+        Callable[[NDArrayFloat | list[float], float, float, float], NDArrayFloat], _cos_curve
+    )
 
     if figure_kwargs is None:
         figure_kwargs = {}
@@ -1500,10 +1550,11 @@ def plot_yaw_misalignment(
         )
 
     # Select figure size based on number of subplots
+    axs: list[list[Axes]] | NDArrayAxes
     if len(ws_bins) == 1:
         figure_kwargs.setdefault("figsize", (6, 5))
-        fig, axs = plt.subplots(1, 1, **figure_kwargs)
-        axs = [[axs]]
+        fig, single_ax = plt.subplots(1, 1, **figure_kwargs)
+        axs = [[single_ax]]
         N_col = 1
     elif len(ws_bins) == 2:
         figure_kwargs.setdefault("figsize", (11, 5))
@@ -1639,14 +1690,14 @@ def plot_yaw_misalignment(
             label=rf"Mean Vane Angle = {round(mean_vane_angle_ws[i], 1)}$^\circ$",  # noqa: W605
         )
 
-        ax.grid("on")
+        ax.grid(True)
 
         ax.legend(**legend_kwargs)
 
         ax.set_ylabel(power_performance_label)
 
         if ylim != (None, None):
-            ax.set_ylim(ylim)
+            ax.set_ylim(*ylim)
         else:
             ax.set_ylim(
                 (
@@ -1690,7 +1741,8 @@ def plot_yaw_misalignment(
         valid_vane_indices = np.where(~np.isnan(np.nanmean(power_values_vane_ws, (0, 1))))[0]
         xlim = (vane_bins[valid_vane_indices[0]] - 1.0, vane_bins[valid_vane_indices[-1]] + 1.0)
 
-    axs[0][0].set_xlim(xlim)
+    axs[0][0].set_xlim(*xlim)
 
     if return_fig:
         return fig, axs
+    return None
