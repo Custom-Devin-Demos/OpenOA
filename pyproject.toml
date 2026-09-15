@@ -164,6 +164,10 @@ files = [
   "openoa/schema/schema.py",
   "openoa/analysis/__init__.py",
   "openoa/analysis/_analysis_validators.py",
+  "openoa/analysis/eya_gap_analysis.py",
+  "openoa/plant.py",
+  "openoa/schema/metadata.py",
+  "openoa/runners/eya_gap_analysis.py",
 ]
 
 [[tool.mypy.overrides]]

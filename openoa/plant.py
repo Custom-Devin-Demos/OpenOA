@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import logging
 import itertools
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, cast
 from pathlib import Path
 
 import yaml
@@ -13,6 +13,7 @@ import pandas as pd
 from attrs import field, define
 from pyproj import Transformer
 from tabulate import tabulate
+from numpy.typing import NDArray
 from IPython.display import Markdown, display
 from shapely.geometry import Point
 
@@ -34,8 +35,10 @@ logger = logging.getLogger(__name__)
 
 @logged_method_call
 def _analysis_filter(
-    error_dict: dict, metadata: PlantMetaData, analysis_types: list[str] = ["all"]
-) -> dict:
+    error_dict: dict[str, Any],
+    metadata: PlantMetaData,
+    analysis_types: list[str | None] = ["all"],
+) -> dict[str, Any]:
     """Filters the errors found by the analysis requirements  provided by the
     :py:attr:`analysis_types`.
 
@@ -61,16 +64,17 @@ def _analysis_filter(
         return {}
 
     if None in analysis_types:
-        _ = analysis_types.pop(analysis_types.index(None))
+        analysis_types.pop(analysis_types.index(None))
 
     categories = ("scada", "meter", "tower", "curtail", "reanalysis", "asset")
-    requirements = {key: ANALYSIS_REQUIREMENTS[key] for key in analysis_types}
-    column_requirements = {
+    requirements = {key: ANALYSIS_REQUIREMENTS[key] for key in cast(list[str], analysis_types)}
+    column_requirements: dict[str, set[str]] = {
         cat: set(
             itertools.chain(*[r.get(cat, {}).get("columns", []) for r in requirements.values()])
         )
         for cat in categories
     }
+    _add: dict[str, set[str]] = {}
     for key, value in column_requirements.items():
         if key == "reanalysis":
             reanalysis_keys = [k for k in error_dict["missing"] if k.startswith(key)]
@@ -101,7 +105,9 @@ def _analysis_filter(
 
 @logged_method_call
 def _compose_error_message(
-    error_dict: dict, metadata: PlantMetaData, analysis_types: list[str] = ["all"]
+    error_dict: dict[str, Any],
+    metadata: PlantMetaData,
+    analysis_types: list[str | None] = ["all"],
 ) -> str:
     """Takes a dictionary of error messages from the ``PlantData`` validation routines,
     filters out errors unrelated to the intended analysis types, and creates a
@@ -177,7 +183,11 @@ def frequency_validator(
     # If an offset alias couldn't be found, then convert the desired frequency strings to seconds
     # unless the frequency string is a monthly time encoding, which is deprecated.
     if not isinstance(actual_freq, str):
-        desired_freq = {ts.offset_to_seconds(el) for el in desired_freq if el not in ("MS", "ME")}
+        numeric_desired_freq = {
+            float(ts.offset_to_seconds(el)) for el in desired_freq if el not in ("MS", "ME")
+        }
+    else:
+        numeric_desired_freq = set()
 
     if exact:
         return actual_freq in desired_freq
@@ -187,13 +197,13 @@ def frequency_validator(
         return actual_freq in desired_freq
 
     # For non-exact matches, just check that the actual is less than the maximum allowable frequency
-    return actual_freq < max(desired_freq)
+    return float(actual_freq) < max(numeric_desired_freq)
 
 
 def convert_to_list(
-    value: Sequence | str | int | float | None,
-    manipulation: Callable | None = None,
-) -> list:
+    value: Sequence[Any] | str | int | float | None,
+    manipulation: Callable[[Any], Any] | None = None,
+) -> list[Any]:
     """Converts an unknown element that could be a list or single, non-sequence element
     to a list of elements.
 
@@ -214,7 +224,7 @@ def convert_to_list(
 
 
 @logged_method_call
-def column_validator(df: pd.DataFrame, column_names={}) -> None | list[str]:
+def column_validator(df: Any, column_names: dict[str, str] = {}) -> list[str]:
     """Validates that the column names exist as provided for each expected column.
 
     Args:
@@ -230,14 +240,14 @@ def column_validator(df: pd.DataFrame, column_names={}) -> None | list[str]:
         missing = set(column_names.values()).difference(df.columns)
     except AttributeError:
         # Catches 'NoneType' object has no attribute 'columns' for no data
-        missing = column_names.values()
+        return list(column_names.values())
     if missing:
         return list(missing)
     return []
 
 
 @logged_method_call
-def dtype_converter(df: pd.DataFrame, column_types={}) -> list[str]:
+def dtype_converter(df: Any, column_types: dict[str, Any] = {}) -> list[str]:
     """Converts the columns provided in :py:attr:`column_types` of :py:attr:`df` to the appropriate
     data type.
 
@@ -267,7 +277,7 @@ def dtype_converter(df: pd.DataFrame, column_types={}) -> list[str]:
 
 
 @logged_method_call
-def load_to_pandas(data: str | Path | pd.DataFrame) -> pd.DataFrame | None:
+def load_to_pandas(data: str | Path | pd.DataFrame | None) -> pd.DataFrame | None:
     """Loads the input data or filepath to apandas DataFrame.
 
     Args:
@@ -291,7 +301,7 @@ def load_to_pandas(data: str | Path | pd.DataFrame) -> pd.DataFrame | None:
 
 
 def load_to_pandas_dict(
-    data: dict[str | Path | pd.DataFrame],
+    data: Any,
 ) -> dict[str, pd.DataFrame] | None:
     """Converts a dictionary of data or data locations to a dictionary of ``pd.DataFrame``s
     by iterating over the dictionary and passing each value to ``load_to_pandas``.
@@ -307,11 +317,11 @@ def load_to_pandas_dict(
         return data
     for key, val in data.items():
         data[key] = load_to_pandas(val)
-    return data
+    return cast(dict[str, pd.DataFrame], data)
 
 
 @logged_method_call
-def rename_columns(df: pd.DataFrame, col_map: dict, reverse: bool = True) -> pd.DataFrame:
+def rename_columns(df: pd.DataFrame, col_map: dict[str, str], reverse: bool = True) -> pd.DataFrame:
     """Renames the pandas DataFrame columns using col_map. Intended to be used in
     conjunction with the a data objects meta data column mapping (``reverse=True``).
 
@@ -328,6 +338,22 @@ def rename_columns(df: pd.DataFrame, col_map: dict, reverse: bool = True) -> pd.
     if reverse:
         col_map = {v: k for k, v in col_map.items()}
     return df.rename(columns=col_map)
+
+
+def _load_plant_metadata(value: PlantMetaData | str | Path | dict[str, Any]) -> PlantMetaData:
+    return PlantMetaData.load(value)
+
+
+def _convert_to_list(value: Any) -> list[Any]:
+    return convert_to_list(value)
+
+
+def _load_to_pandas(value: Any) -> pd.DataFrame | None:
+    return load_to_pandas(value)
+
+
+def _load_to_pandas_dict(value: Any) -> dict[str, pd.DataFrame] | None:
+    return load_to_pandas_dict(value)
 
 
 ############################
@@ -410,40 +436,38 @@ class PlantData:
 
     log_level: str = field(default="WARNING", converter=set_log_level)
     metadata: PlantMetaData = field(
-        default={},
-        converter=PlantMetaData.load,
-        on_setattr=[attrs.converters, attrs.validators],
+        default=cast(Any, {}),
+        converter=_load_plant_metadata,
+        on_setattr=[attrs.setters.convert, attrs.setters.validate],
         repr=False,
     )
-    analysis_type: list[str] | None = field(
+    analysis_type: list[str | None] | None = field(
         default=None,
-        converter=convert_to_list,  # noqa: F821
+        converter=_convert_to_list,
         validator=attrs.validators.deep_iterable(
             iterable_validator=attrs.validators.instance_of(list),
             member_validator=attrs.validators.in_([*ANALYSIS_REQUIREMENTS] + ["all", None]),
         ),
         on_setattr=[attrs.setters.convert, attrs.setters.validate],
     )
-    scada: pd.DataFrame | None = field(default=None, converter=load_to_pandas)  # noqa: F821
-    meter: pd.DataFrame | None = field(default=None, converter=load_to_pandas)  # noqa: F821
-    tower: pd.DataFrame | None = field(default=None, converter=load_to_pandas)  # noqa: F821
-    status: pd.DataFrame | None = field(default=None, converter=load_to_pandas)  # noqa: F821
-    curtail: pd.DataFrame | None = field(default=None, converter=load_to_pandas)  # noqa: F821
-    asset: pd.DataFrame | None = field(default=None, converter=load_to_pandas)  # noqa: F821
-    reanalysis: dict[str, pd.DataFrame] | None = field(
-        default=None, converter=load_to_pandas_dict  # noqa: F821
-    )
+    scada: Any = field(default=None, converter=_load_to_pandas)
+    meter: Any = field(default=None, converter=_load_to_pandas)
+    tower: Any = field(default=None, converter=_load_to_pandas)
+    status: Any = field(default=None, converter=_load_to_pandas)
+    curtail: Any = field(default=None, converter=_load_to_pandas)
+    asset: Any = field(default=None, converter=_load_to_pandas)
+    reanalysis: Any = field(default=None, converter=_load_to_pandas_dict)
 
     # No user initialization required for attributes defined below here
     # Error catching in validation
-    _errors: dict[str, list[str]] = field(
+    _errors: dict[str, Any] = field(
         default={"missing": {}, "dtype": {}, "frequency": {}, "attributes": []}, init=False
     )
-    eia: dict = field(default={}, init=False)
+    eia: dict[str, Any] = field(default={}, init=False)
     asset_distance_matrix: pd.DataFrame = field(init=False, default=pd.DataFrame([]))
     asset_direction_matrix: pd.DataFrame = field(init=False, default=pd.DataFrame([]))
 
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         """Post-initialization hook."""
         self._calculate_reanalysis_columns()
         self._set_index_columns()
@@ -451,11 +475,15 @@ class PlantData:
 
         # Remove the non-product-specific reanalysis key if it exists
         # TODO: Find where this is actually entering the missing/dtype dictionaries
-        [d.pop("reanalysis") for d in self._errors.values() if "reanalysis" in d]
+        [
+            d.pop("reanalysis")
+            for d in self._errors.values()
+            if isinstance(d, dict) and "reanalysis" in d
+        ]
 
         # Check the errors againts the analysis requirements
         error_message = _compose_error_message(
-            self._errors, metadata=self.metadata, analysis_types=self.analysis_type
+            self._errors, metadata=self.metadata, analysis_types=self.analysis_type or [None]
         )
         if error_message != "":
             raise ValueError(error_message)
@@ -480,7 +508,7 @@ class PlantData:
     @curtail.validator
     @asset.validator
     @logged_method_call
-    def data_validator(self, instance: attrs.Attribute, value: pd.DataFrame | None) -> None:
+    def data_validator(self, instance: attrs.Attribute[Any], value: pd.DataFrame | None) -> None:
         """Validator function for each of the data buckets in ``PlantData`` that checks
         that the appropriate columns exist for each dataframe, each column is of the
         right type, and that the timestamp frequencies are appropriate for the given
@@ -507,7 +535,7 @@ class PlantData:
     @reanalysis.validator
     @logged_method_call
     def reanalysis_validator(
-        self, instance: attrs.Attribute, value: dict[str, pd.DataFrame] | None
+        self, instance: attrs.Attribute[Any], value: dict[str, pd.DataFrame] | None
     ) -> None:
         """Validator function for the reanalysis data that checks for both matching reanalysis
         product keys in the ``PlantMetaData.reanalysis`` metadata definition, and the following:
@@ -545,7 +573,7 @@ class PlantData:
             self._errors["missing"].update(self._validate_column_names(category=name))
             self._errors["dtype"].update(self._validate_dtypes(category=name))
 
-    def __generate_text_repr(self):
+    def __generate_text_repr(self) -> str:
         """Generates a text summary of the core internal data."""
         repr = []
         for attribute in self.__attrs_attrs__:
@@ -591,7 +619,7 @@ class PlantData:
                     )
         return "\n".join(repr)
 
-    def __generate_markdown_repr(self):
+    def __generate_markdown_repr(self) -> str:
         """Generates a markdown-friendly summary of the core internal data."""
         new_line = "\n"
 
@@ -599,7 +627,7 @@ class PlantData:
             "PlantData",
             new_line,
             "**analysis_type**",
-            *[f"- {el}" for el in self.analysis_type],
+            *[f"- {el}" for el in (self.analysis_type or [])],
             new_line,
         ]
 
@@ -633,21 +661,25 @@ class PlantData:
 
         return (new_line).join(repr)
 
-    def __str__(self):
+    def __str__(self) -> str:
         """The string summary."""
         return self.__generate_text_repr()
 
-    def markdown(self):
+    def markdown(self) -> None:
         """A markdown-formatted version of the ``__str__``."""
-        display(Markdown(self.__generate_markdown_repr()))
+        markdown_factory: Callable[[str], Any] = Markdown
+        display_fn: Callable[[Any], Any] = display
+        display_fn(markdown_factory(self.__generate_markdown_repr()))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """A context-aware summary generator for printing out the objects."""
         is_terminal = sys.stderr.isatty()
         if is_terminal:
             return self.__generate_text_repr()
         else:
-            return repr(display(Markdown(self.__generate_markdown_repr())))
+            markdown_factory: Callable[[str], Any] = Markdown
+            display_fn: Callable[[Any], Any] = display
+            return repr(display_fn(markdown_factory(self.__generate_markdown_repr())))
 
     @logged_method_call
     def _set_index_columns(self) -> None:
@@ -723,7 +755,7 @@ class PlantData:
                 self.reanalysis[name].reset_index(drop=False, inplace=True)
 
     @property
-    def data_dict(self) -> dict[str, pd.DataFrame]:
+    def data_dict(self) -> dict[str, Any]:
         """Property that returns a dictionary of the data contained in the ``PlantData`` object.
 
         Returns:
@@ -892,7 +924,7 @@ class PlantData:
         # TODO: Consider if this should be a encoded in the metadata/plantdata object elsewhere
         column_name_map = self.metadata.column_map
         column_dtype_map = self.metadata.dtype_map
-        column_map = {}
+        column_map: dict[str, Any] = {}
         for name in column_name_map:
             if name == "reanalysis":
                 column_map[name] = {}
@@ -933,7 +965,7 @@ class PlantData:
         return error_cols
 
     @logged_method_call
-    def _validate_frequency(self, category: str = "all") -> list[str]:
+    def _validate_frequency(self, category: str = "all") -> dict[str, Any]:
         """Internal method to check the actual datetime frequencies against the required
         frequencies for the specified analysis types, and produces a list of data types
         that do not meet the frequency criteria.
@@ -944,11 +976,11 @@ class PlantData:
         Returns:
             list[str]: The list of data types that don't meet the required datetime frequency.
         """
-        frequency_requirements = self.metadata.frequency_requirements(self.analysis_type)
+        frequency_requirements = self.metadata.frequency_requirements(self.analysis_type or [None])
 
         # Collect all the frequencies for each of the data types
         data_dict = self.data_dict
-        actual_frequencies = {}
+        actual_frequencies: dict[str, Any] = {}
 
         for name, df in data_dict.items():
             if df is None:
@@ -963,7 +995,7 @@ class PlantData:
                 for sub_name, df in data_dict[name].items():
                     actual_frequencies["reanalysis"][sub_name] = ts.determine_frequency(df)
 
-        invalid_freq = {}
+        invalid_freq: dict[str, Any] = {}
         for name, freq in actual_frequencies.items():
             if category != "all" and category != name:
                 # If only checking one data type, then skip all others
@@ -985,7 +1017,7 @@ class PlantData:
         return invalid_freq
 
     @logged_method_call
-    def validate(self, metadata: dict | str | Path | PlantMetaData | None = None) -> None:
+    def validate(self, metadata: dict[str, Any] | str | Path | PlantMetaData | None = None) -> None:
         """Secondary method to validate the plant data objects after loading or changing
         data with option to provide an updated `metadata` object/file as well
 
@@ -1006,7 +1038,7 @@ class PlantData:
         if metadata is None:
             self.update_column_names(to_original=True)
         else:
-            self.metadata = metadata
+            self.metadata = _load_plant_metadata(metadata)
 
         # Reset the index columns to be part of the columns space so the validations still work
         self._errors = {
@@ -1017,7 +1049,9 @@ class PlantData:
         self._set_index_columns()
         self._errors["frequency"] = self._validate_frequency()
 
-        error_message = _compose_error_message(self._errors, self.metadata, self.analysis_type)
+        error_message = _compose_error_message(
+            self._errors, self.metadata, self.analysis_type or [None]
+        )
         if error_message:
             raise ValueError(error_message)
         self.update_column_names()
@@ -1159,20 +1193,20 @@ class PlantData:
         self.scada[energy_col] = convert_power_to_energy(self.scada[power_col], frequency)
 
     @property
-    def turbine_ids(self) -> np.ndarray:
+    def turbine_ids(self) -> NDArray[Any]:
         """The 1D array of turbine IDs. This is created from the `asset` data, or unique IDs from the
         SCADA data, if `asset` is undefined.
         """
         if self.asset is None:
-            return self.scada.index.get_level_values("asset_id").unique()
-        return self.asset.loc[self.asset["type"] == "turbine"].index.values
+            return cast(NDArray[Any], self.scada.index.get_level_values("asset_id").unique())
+        return cast(NDArray[Any], self.asset.loc[self.asset["type"] == "turbine"].index.values)
 
     @property
     def n_turbines(self) -> int:
         """The number of turbines contained in the data."""
         return self.turbine_ids.size
 
-    def turbine_df(self, turbine_id: str) -> pd.DataFrame:
+    def turbine_df(self, turbine_id: str) -> Any:
         """Filters `scada` on a single `turbine_id` and returns the filtered data frame.
 
         Args:
@@ -1186,20 +1220,20 @@ class PlantData:
         return self.scada.xs(turbine_id, level=1)
 
     @property
-    def tower_ids(self) -> np.ndarray:
+    def tower_ids(self) -> NDArray[Any]:
         """The 1D array of met tower IDs. This is created from the `asset` data, or unique IDs from the
         tower data, if `asset` is undefined.
         """
         if self.asset is None:
-            return self.tower.index.get_level_values("asset_id").unique()
-        return self.asset.loc[self.asset["type"] == "tower"].index.values
+            return cast(NDArray[Any], self.tower.index.get_level_values("asset_id").unique())
+        return cast(NDArray[Any], self.asset.loc[self.asset["type"] == "tower"].index.values)
 
     @property
     def n_towers(self) -> int:
         """The number of met towers contained in the data."""
         return self.tower_ids.size
 
-    def tower_df(self, tower_id: str) -> pd.DataFrame:
+    def tower_df(self, tower_id: str) -> Any:
         """Filters `tower` on a single `tower_id` and returns the filtered data frame.
 
         Args:
@@ -1213,18 +1247,18 @@ class PlantData:
         return self.tower.xs(tower_id, level=1)
 
     @property
-    def asset_ids(self) -> np.ndarray:
+    def asset_ids(self) -> NDArray[Any]:
         """The ID array of turbine and met tower IDs. This is created from the `asset` data, or unique
         IDs from both the SCADA data and tower data, if `asset` is undefined.
         """
         if self.asset is None:
-            return np.concatenate([self.turbine_ids, self.tower_ids])
-        return self.asset.index.values
+            return cast(NDArray[Any], np.concatenate([self.turbine_ids, self.tower_ids]))
+        return cast(NDArray[Any], self.asset.index.values)
 
     # NOTE: v2 AssetData methods
 
     @logged_method_call
-    def calculate_asset_distance_matrix(self) -> pd.DataFrame:
+    def calculate_asset_distance_matrix(self) -> None:
         """Calculates the distance between all assets on the site with `np.inf` for the distance
         between an asset and itself.
 
@@ -1238,7 +1272,7 @@ class PlantData:
                 for i, j in itertools.combinations(ix, 2)
             )
             .pivot(index=0, columns=1, values=2)
-            .rename_axis(index={0: None}, columns={1: None})
+            .rename_axis(index=cast(Any, {0: None}), columns=cast(Any, {1: None}))
             .fillna(0)
             .loc[ix[:-1], ix[1:]]
         )
@@ -1254,7 +1288,7 @@ class PlantData:
         distance.loc[:, :] = distance_array
         self.asset_distance_matrix = distance
 
-    def turbine_distance_matrix(self, turbine_id: str = None) -> pd.DataFrame:
+    def turbine_distance_matrix(self, turbine_id: str | None = None) -> Any:
         """Returns the distances between all turbines in the plant with `np.inf` for the distance
         between a turbine and itself.
 
@@ -1269,9 +1303,10 @@ class PlantData:
             self.calculate_asset_distance_matrix()
 
         row_ix = self.turbine_ids if turbine_id is None else turbine_id
-        return self.asset_distance_matrix.loc[row_ix, self.turbine_ids]
+        matrix: Any = self.asset_distance_matrix
+        return matrix.loc[row_ix, self.turbine_ids]
 
-    def tower_distance_matrix(self, tower_id: str = None) -> pd.DataFrame:
+    def tower_distance_matrix(self, tower_id: str | None = None) -> Any:
         """Returns the distances between all towers in the plant with `np.inf` for the distance
         between a tower and itself.
 
@@ -1286,10 +1321,11 @@ class PlantData:
             self.calculate_asset_distance_matrix()
 
         row_ix = self.tower_ids if tower_id is None else tower_id
-        return self.asset_distance_matrix.loc[row_ix, self.tower_ids]
+        matrix: Any = self.asset_distance_matrix
+        return matrix.loc[row_ix, self.tower_ids]
 
     @logged_method_call
-    def calculate_asset_direction_matrix(self) -> pd.DataFrame:
+    def calculate_asset_direction_matrix(self) -> None:
         """Calculates the direction between all assets on the site with `np.inf` for the direction
         between an asset and itself, for all assets.
 
@@ -1314,7 +1350,7 @@ class PlantData:
                 for i, j in itertools.combinations(ix, 2)
             )
             .pivot(index=0, columns=1, values=2)
-            .rename_axis(index={0: None}, columns={1: None})
+            .rename_axis(index=cast(Any, {0: None}), columns=cast(Any, {1: None}))
             .fillna(0)
             .loc[ix[:-1], ix[1:]]
         )
@@ -1334,7 +1370,7 @@ class PlantData:
         direction.loc[:, :] = direction_array
         self.asset_direction_matrix = direction
 
-    def turbine_direction_matrix(self, turbine_id: str = None) -> pd.DataFrame:
+    def turbine_direction_matrix(self, turbine_id: str | None = None) -> Any:
         """Returns the directions between all turbines in the plant with `np.inf` for the direction
         between a turbine and itself.
 
@@ -1351,9 +1387,10 @@ class PlantData:
             self.calculate_asset_direction_matrix()
 
         row_ix = self.turbine_ids if turbine_id is None else turbine_id
-        return self.asset_direction_matrix.loc[row_ix, self.turbine_ids]
+        matrix: Any = self.asset_direction_matrix
+        return matrix.loc[row_ix, self.turbine_ids]
 
-    def tower_direction_matrix(self, tower_id: str = None) -> pd.DataFrame:
+    def tower_direction_matrix(self, tower_id: str | None = None) -> Any:
         """Returns the directions between all towers in the plant with `np.inf` for the direction
         between a tower and itself.
 
@@ -1370,7 +1407,8 @@ class PlantData:
             self.calculate_asset_direction_matrix()
 
         row_ix = self.tower_ids if tower_id is None else tower_id
-        return self.asset_direction_matrix.loc[row_ix, self.tower_ids]
+        matrix: Any = self.asset_direction_matrix
+        return matrix.loc[row_ix, self.tower_ids]
 
     def calculate_asset_geometries(self) -> None:
         """Calculates the asset distances and parses the asset geometries. This is intended for use
@@ -1383,7 +1421,7 @@ class PlantData:
 
     def get_freestream_turbines(
         self, wd: float, freestream_method: str = "sector", sector_width: float = 90.0
-    ):
+    ) -> list[Any]:
         """
         Returns a list of freestream (unwaked) turbines for a given wind direction. Freestream turbines can be
         identified using different methods ("sector" or "IEC" methods). For the sector method, if there are any
@@ -1448,7 +1486,9 @@ class PlantData:
 
     @logged_method_call
     def calculate_nearest_neighbor(
-        self, turbine_ids: list | np.ndarray = None, tower_ids: list | np.ndarray = None
+        self,
+        turbine_ids: list[Any] | NDArray[Any] | None = None,
+        tower_ids: list[Any] | NDArray[Any] | None = None,
     ) -> None:
         """Finds nearest turbine and met tower neighbors all of the available turbines and towers
         in `asset` or as defined in `turbine_ids` and `tower_ids`.
@@ -1494,7 +1534,7 @@ class PlantData:
         """
         if "nearest_turbine_id" not in self.asset.columns:
             self.calculate_nearest_neighbor()
-        return self.asset.loc[asset_id, "nearest_turbine_id"].values[0]
+        return cast(str, self.asset.loc[asset_id, "nearest_turbine_id"].values[0])
 
     def nearest_tower(self, asset_id: str) -> str:
         """Finds the nearest tower to the provided `asset_id`.
@@ -1507,10 +1547,10 @@ class PlantData:
         """
         if "nearest_tower_id" not in self.asset.columns:
             self.calculate_nearest_neighbor()
-        return self.asset.loc[asset_id, "nearest_tower_id"].values[0]
+        return cast(str, self.asset.loc[asset_id, "nearest_tower_id"].values[0])
 
     @classmethod
-    def from_entr(cls, *args, **kwargs):
+    def from_entr(cls, *args: Any, **kwargs: Any) -> Any:
         try:
             from entr.plantdata import from_entr
         except ModuleNotFoundError:

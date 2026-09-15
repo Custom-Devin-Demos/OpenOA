@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 import json
+import logging
 import warnings
 import itertools
 from copy import deepcopy
 from string import digits
+from typing import Any, Literal, TypeVar, cast, overload
 from pathlib import Path
 
 import yaml
@@ -15,7 +17,7 @@ import pandas as pd
 from attrs import field, define
 from tabulate import tabulate
 
-from openoa.logging import logging, logged_method_call
+from openoa.logging import logged_method_call
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("once", category=DeprecationWarning)
@@ -194,9 +196,9 @@ def convert_frequency(offset: str) -> str:
             "min", "s", "ms", "us", "ns", "M", "H", "T", "S", "L", "U", or "N".
     """
     # Separate leading digits and the offset code
-    offset_digits = re.findall(r"\d+", offset)
-    offset_digits = "" if offset_digits == [] else offset_digits[0]
-    offset_str = offset.translate(remove_digits)
+    offset_digits_list = re.findall(r"\d+", offset)
+    offset_digits = "" if not offset_digits_list else offset_digits_list[0]
+    offset_str: str = offset.translate(remove_digits)
 
     # Check the code is a valid format
     _check = f"{offset_digits}{offset_str}"
@@ -211,7 +213,7 @@ def convert_frequency(offset: str) -> str:
             f"Pandas 3.0 will deprecated the following codes, please use the following mapping {deprecated_offset_map}",
             DeprecationWarning,
         )
-        offset_str = deprecated_offset_map.get(offset_str, None)
+        offset_str = deprecated_offset_map[offset_str]
 
     elif offset_str not in _at_least_monthly:
         raise ValueError(
@@ -221,9 +223,27 @@ def convert_frequency(offset: str) -> str:
     return f"{offset_digits}{offset_str}"
 
 
+def _convert_frequency(offset: str) -> str:
+    return convert_frequency(offset)
+
+
+@overload
+def determine_analysis_requirements(
+    which: Literal["both"], analysis_type: str | list[str]
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    pass
+
+
+@overload
+def determine_analysis_requirements(
+    which: Literal["columns", "frequency"], analysis_type: str | list[str]
+) -> dict[str, Any]:
+    pass
+
+
 def determine_analysis_requirements(
     which: str, analysis_type: str | list[str]
-) -> dict | tuple[dict, dict]:
+) -> dict[str, Any] | tuple[dict[str, set[str]], dict[str, set[str]]]:
     """Determines the column, frequency, or both requirements for each type of data, such as SCADA,
     depending on the analysis type(s) provided.
 
@@ -256,14 +276,14 @@ def determine_analysis_requirements(
             key: {name: value["freq"] for name, value in values.items()}
             for key, values in requirements.items()
         }
-        frequency_requirements = {
-            k: []
+        frequency_requirements: dict[str, set[str]] = {
+            k: set()
             for k in set(itertools.chain.from_iterable([[*val] for val in frequency.values()]))
         }
         for vals in frequency.values():
             for name, req in vals.items():
                 reqs = frequency_requirements[name]
-                if reqs == []:
+                if not reqs:
                     frequency_requirements[name] = set(req)
                 else:
                     frequency_requirements[name] = reqs.intersection(req)
@@ -276,7 +296,9 @@ def determine_analysis_requirements(
     raise ValueError("`which` must be one of 'columns', 'frequency', or 'both'.")
 
 
-@define(auto_attribs=True)
+T = TypeVar("T", bound="FromDictMixin")
+
+
 class FromDictMixin:
     """A Mixin class to allow for kwargs overloading when a data class doesn't
     have a specific parameter definied. This allows passing of larger dictionaries
@@ -290,7 +312,7 @@ class FromDictMixin:
 
     @classmethod
     @logged_method_call
-    def from_dict(cls, data: dict):
+    def from_dict(cls: type[T], data: dict[str, Any]) -> T:
         """Maps a data dictionary to an `attrs`-defined class.
         Args:
             data (dict): The data dictionary to be mapped.
@@ -298,7 +320,7 @@ class FromDictMixin:
             (cls): An intialized object of the `attrs`-defined class (`cls`).
         """
         # Get all parameters from the input dictionary that map to the class initialization
-        kwarg_names = [a.name for a in cls.__attrs_attrs__ if a.init]
+        kwarg_names = [a.name for a in attrs.fields(cast(Any, cls)) if a.init]
         matching = [name for name in kwarg_names if name in data]
         non_matching = [name for name in data if name not in kwarg_names]
         logger.info(f"No matches for provided kwarg inputs: {non_matching}")
@@ -306,16 +328,14 @@ class FromDictMixin:
 
         # Map the inputs must be provided: 1) must be initialized, 2) no default value defined
         required_inputs = [
-            a.name
-            for a in cls.__attrs_attrs__  # type: ignore
-            if a.init and isinstance(a.default, type(attrs.NOTHING))  # type: ignore
+            a.name for a in attrs.fields(cast(Any, cls)) if a.init and a.default is attrs.NOTHING
         ]
         undefined = sorted(set(required_inputs) - set(kwargs))
         if undefined:
             raise AttributeError(
                 f"The class defintion for {cls.__name__} is missing the following inputs: {undefined}"
             )
-        return cls(**kwargs)  # type: ignore
+        return cls(**kwargs)
 
 
 @define(auto_attribs=True)
@@ -326,7 +346,7 @@ class ResetValuesMixin:
     """
 
     @logged_method_call
-    def set_values(self, value_dict: dict):
+    def set_values(self, value_dict: dict[str, Any]) -> None:
         """Resets the parameters to the values provided in :py:attr:`value_dict`.
 
         Args:
@@ -337,7 +357,7 @@ class ResetValuesMixin:
             object.__setattr__(self, name, value)
 
     @logged_method_call
-    def reset_defaults(self, which: str | list[str] | tuple[str] | None = None):
+    def reset_defaults(self, which: str | list[str] | tuple[str] | None = None) -> None:
         """Reset all or a subset of the analysis parameters back to their defaults.
 
         Args:
@@ -349,7 +369,7 @@ class ResetValuesMixin:
         """
         logger.info("Resetting run parameters back to the class defaults")
         # Define the analysis class run parameters
-        valid = self.run_parameters
+        valid: list[str] = getattr(self, "run_parameters")
 
         # If None, set to all run parameterizations
         if which is None:
@@ -364,7 +384,7 @@ class ResetValuesMixin:
         self.set_values(reset_dict)
 
 
-def _make_single_repr(name: str, meta_class) -> str:
+def _make_single_repr(name: str, meta_class: Any) -> str:
     summary = pd.concat(
         [
             pd.DataFrame.from_dict(meta_class.col_map, orient="index", columns=["Column Name"]),
@@ -382,7 +402,7 @@ def _make_single_repr(name: str, meta_class) -> str:
     )
 
     if name == "ReanalysisMetaData":
-        repr = []
+        repr: list[str] = []
     else:
         repr = ["-" * len(name), name, "-" * len(name) + "\n"]
 
@@ -391,7 +411,7 @@ def _make_single_repr(name: str, meta_class) -> str:
         repr.append(meta_class.frequency)
 
     repr.append("\nMetadata Summary\n----------------")
-    repr.append(tabulate(summary, headers=summary.columns, tablefmt="grid"))
+    repr.append(tabulate(cast(Any, summary), headers=list(summary.columns), tablefmt="grid"))
     return "\n".join(repr)
 
 
@@ -471,15 +491,15 @@ class SCADAMetaData(FromDictMixin):  # noqa: F821
     WMET_EnvTmp: str = field(default="WMET_EnvTmp")
 
     # Data about the columns
-    frequency: str = field(default="10min", converter=convert_frequency)
+    frequency: str = field(default="10min", converter=_convert_frequency)
 
     # Parameterizations that should not be changed
     # Prescribed mappings, datatypes, and units for in-code reference.
     name: str = field(default="scada", init=False)
     WTUR_SupWh: str = field(default="WTUR_SupWh", init=False)  # calculated in PlantData
-    col_map: dict = field(init=False)
-    col_map_reversed: dict = field(init=False)
-    dtypes: dict = field(
+    col_map: dict[str, str] = field(init=False)
+    col_map_reversed: dict[str, str] = field(init=False)
+    dtypes: dict[str, Any] = field(
         default=dict(
             time=np.datetime64,
             asset_id=str,
@@ -494,7 +514,7 @@ class SCADAMetaData(FromDictMixin):  # noqa: F821
         ),
         init=False,  # don't allow for user input
     )
-    units: dict = field(
+    units: dict[str, str | None] = field(
         default=dict(
             time="datetim64[ns]",
             asset_id=None,
@@ -525,7 +545,7 @@ class SCADAMetaData(FromDictMixin):  # noqa: F821
         )
         self.col_map_reversed = {v: k for k, v in self.col_map.items()}
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return _make_single_repr("SCADAMetaData", self)
 
 
@@ -555,20 +575,20 @@ class MeterMetaData(FromDictMixin):  # noqa: F821
     MMTR_SupWh: str = field(default="MMTR_SupWh")
 
     # Data about the columns
-    frequency: str = field(default="10min", converter=convert_frequency)
+    frequency: str = field(default="10min", converter=_convert_frequency)
 
     # Parameterizations that should not be changed
     # Prescribed mappings, datatypes, and units for in-code reference.
     name: str = field(default="meter", init=False)
-    col_map: dict = field(init=False)
-    dtypes: dict = field(
+    col_map: dict[str, str] = field(init=False)
+    dtypes: dict[str, Any] = field(
         default=dict(
             time=np.datetime64,
             MMTR_SupWh=float,
         ),
         init=False,  # don't allow for user input
     )
-    units: dict = field(
+    units: dict[str, str | None] = field(
         default=dict(
             time="datetim64[ns]",
             MMTR_SupWh="kWh",
@@ -582,7 +602,7 @@ class MeterMetaData(FromDictMixin):  # noqa: F821
             MMTR_SupWh=self.MMTR_SupWh,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return _make_single_repr("MeterMetaData", self)
 
 
@@ -620,13 +640,13 @@ class TowerMetaData(FromDictMixin):  # noqa: F821
     WMET_EnvTmp: str = field(default="WMET_EnvTmp")
 
     # Data about the columns
-    frequency: str = field(default="10min", converter=convert_frequency)
+    frequency: str = field(default="10min", converter=_convert_frequency)
 
     # Parameterizations that should not be changed
     # Prescribed mappings, datatypes, and units for in-code reference.
     name: str = field(default="tower", init=False)
-    col_map: dict = field(init=False)
-    dtypes: dict = field(
+    col_map: dict[str, str] = field(init=False)
+    dtypes: dict[str, Any] = field(
         default=dict(
             time=np.datetime64,
             asset_id=str,
@@ -636,7 +656,7 @@ class TowerMetaData(FromDictMixin):  # noqa: F821
         ),
         init=False,  # don't allow for user input
     )
-    units: dict = field(
+    units: dict[str, str | None] = field(
         default=dict(
             time="datetim64[ns]",
             asset_id=None,
@@ -656,7 +676,7 @@ class TowerMetaData(FromDictMixin):  # noqa: F821
             WMET_EnvTmp=self.WMET_EnvTmp,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return _make_single_repr("TowerMetaData", self)
 
 
@@ -694,13 +714,13 @@ class StatusMetaData(FromDictMixin):  # noqa: F821
     status_text: str = field(default="status_text")
 
     # Data about the columns
-    frequency: str = field(default="10min", converter=convert_frequency)
+    frequency: str = field(default="10min", converter=_convert_frequency)
 
     # Parameterizations that should not be changed
     # Prescribed mappings, datatypes, and units for in-code reference.
     name: str = field(default="status", init=False)
-    col_map: dict = field(init=False)
-    dtypes: dict = field(
+    col_map: dict[str, str] = field(init=False)
+    dtypes: dict[str, Any] = field(
         default=dict(
             time=np.datetime64,
             asset_id=str,
@@ -710,7 +730,7 @@ class StatusMetaData(FromDictMixin):  # noqa: F821
         ),
         init=False,  # don't allow for user input
     )
-    units: dict = field(
+    units: dict[str, str | None] = field(
         default=dict(
             time="datetim64[ns]",
             asset_id=None,
@@ -730,7 +750,7 @@ class StatusMetaData(FromDictMixin):  # noqa: F821
             status_text=self.status_text,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return _make_single_repr("StatusMetaData", self)
 
 
@@ -762,13 +782,13 @@ class CurtailMetaData(FromDictMixin):  # noqa: F821
     IAVL_DnWh: str = field(default="IAVL_DnWh")
 
     # Data about the columns
-    frequency: str = field(default="10min", converter=convert_frequency)
+    frequency: str = field(default="10min", converter=_convert_frequency)
 
     # Parameterizations that should not be changed
     # Prescribed mappings, datatypes, and units for in-code reference.
     name: str = field(default="curtail", init=False)
-    col_map: dict = field(init=False)
-    dtypes: dict = field(
+    col_map: dict[str, str] = field(init=False)
+    dtypes: dict[str, Any] = field(
         default=dict(
             time=np.datetime64,
             IAVL_ExtPwrDnWh=float,
@@ -776,7 +796,7 @@ class CurtailMetaData(FromDictMixin):  # noqa: F821
         ),
         init=False,  # don't allow for user input
     )
-    units: dict = field(
+    units: dict[str, str | None] = field(
         default=dict(
             time="datetim64[ns]",
             IAVL_ExtPwrDnWh="kWh",
@@ -792,7 +812,7 @@ class CurtailMetaData(FromDictMixin):  # noqa: F821
             IAVL_DnWh=self.IAVL_DnWh,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return _make_single_repr("CurtailMetaData", self)
 
 
@@ -832,8 +852,8 @@ class AssetMetaData(FromDictMixin):  # noqa: F821
     # Parameterizations that should not be changed
     # Prescribed mappings, datatypes, and units for in-code reference.
     name: str = field(default="asset", init=False)
-    col_map: dict = field(init=False)
-    dtypes: dict = field(
+    col_map: dict[str, str] = field(init=False)
+    dtypes: dict[str, Any] = field(
         default=dict(
             asset_id=str,
             latitude=float,
@@ -846,7 +866,7 @@ class AssetMetaData(FromDictMixin):  # noqa: F821
         ),
         init=False,  # don't allow for user input
     )
-    units: dict = field(
+    units: dict[str, str | None] = field(
         default=dict(
             asset_id=None,
             latitude="WGS84",
@@ -872,11 +892,11 @@ class AssetMetaData(FromDictMixin):  # noqa: F821
             type=self.type,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return _make_single_repr("AssetMetaData", self)
 
 
-def convert_reanalysis(value: dict[str, dict]):
+def convert_reanalysis(value: dict[str, dict[str, Any]]) -> dict[str, ReanalysisMetaData]:
     return {k: ReanalysisMetaData.from_dict(v) for k, v in value.items()}
 
 
@@ -918,13 +938,13 @@ class ReanalysisMetaData(FromDictMixin):  # noqa: F821
     WMETR_EnvPres: str = field(default="surface_pressure")
 
     # Data about the columns
-    frequency: str = field(default="10min", converter=convert_frequency)
+    frequency: str = field(default="10min", converter=_convert_frequency)
 
     # Parameterizations that should not be changed
     # Prescribed mappings, datatypes, and units for in-code reference.
     name: str = field(default="reanalysis", init=False)
-    col_map: dict = field(init=False)
-    dtypes: dict = field(
+    col_map: dict[str, str] = field(init=False)
+    dtypes: dict[str, Any] = field(
         default=dict(
             time=np.datetime64,
             WMETR_HorWdSpd=float,
@@ -937,7 +957,7 @@ class ReanalysisMetaData(FromDictMixin):  # noqa: F821
         ),
         init=False,  # don't allow for user input
     )
-    units: dict = field(
+    units: dict[str, str | None] = field(
         default=dict(
             time="datetim64[ns]",
             WMETR_HorWdSpd="m/s",
@@ -963,8 +983,38 @@ class ReanalysisMetaData(FromDictMixin):  # noqa: F821
             WMETR_EnvPres=self.WMETR_EnvPres,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return _make_single_repr("ReanalysisMetaData", self)
+
+
+def _to_scada_metadata(
+    value: SCADAMetaData | dict[str, Any],
+) -> SCADAMetaData:
+    return value if isinstance(value, SCADAMetaData) else SCADAMetaData.from_dict(value)
+
+
+def _to_meter_metadata(value: MeterMetaData | dict[str, Any]) -> MeterMetaData:
+    return value if isinstance(value, MeterMetaData) else MeterMetaData.from_dict(value)
+
+
+def _to_tower_metadata(value: TowerMetaData | dict[str, Any]) -> TowerMetaData:
+    return value if isinstance(value, TowerMetaData) else TowerMetaData.from_dict(value)
+
+
+def _to_status_metadata(value: StatusMetaData | dict[str, Any]) -> StatusMetaData:
+    return value if isinstance(value, StatusMetaData) else StatusMetaData.from_dict(value)
+
+
+def _to_curtail_metadata(value: CurtailMetaData | dict[str, Any]) -> CurtailMetaData:
+    return value if isinstance(value, CurtailMetaData) else CurtailMetaData.from_dict(value)
+
+
+def _to_asset_metadata(value: AssetMetaData | dict[str, Any]) -> AssetMetaData:
+    return value if isinstance(value, AssetMetaData) else AssetMetaData.from_dict(value)
+
+
+def _load_plant_metadata(value: PlantMetaData | str | Path | dict[str, Any]) -> PlantMetaData:
+    return PlantMetaData.load(value)
 
 
 @define(auto_attribs=True)
@@ -1005,21 +1055,21 @@ class PlantMetaData(FromDictMixin):  # noqa: F821
     latitude: float = field(default=0, converter=float)
     longitude: float = field(default=0, converter=float)
     reference_system: str = field(default="epsg:4326")
-    reference_longitude: float = field(default=None)
-    utm_zone: int = field(default=None)
+    reference_longitude: float | None = field(default=None)
+    utm_zone: int | None = field(default=None)
     capacity: float = field(default=0, converter=float)
-    scada: SCADAMetaData = field(default={}, converter=SCADAMetaData.from_dict)
-    meter: MeterMetaData = field(default={}, converter=MeterMetaData.from_dict)
-    tower: TowerMetaData = field(default={}, converter=TowerMetaData.from_dict)
-    status: StatusMetaData = field(default={}, converter=StatusMetaData.from_dict)
-    curtail: CurtailMetaData = field(default={}, converter=CurtailMetaData.from_dict)
-    asset: AssetMetaData = field(default={}, converter=AssetMetaData.from_dict)
+    scada: SCADAMetaData = field(default=cast(Any, {}), converter=_to_scada_metadata)
+    meter: MeterMetaData = field(default=cast(Any, {}), converter=_to_meter_metadata)
+    tower: TowerMetaData = field(default=cast(Any, {}), converter=_to_tower_metadata)
+    status: StatusMetaData = field(default=cast(Any, {}), converter=_to_status_metadata)
+    curtail: CurtailMetaData = field(default=cast(Any, {}), converter=_to_curtail_metadata)
+    asset: AssetMetaData = field(default=cast(Any, {}), converter=_to_asset_metadata)
     reanalysis: dict[str, ReanalysisMetaData] = field(
         default={"product": {}}, converter=convert_reanalysis  # noqa: F821
     )  # noqa: F821
 
     @property
-    def column_map(self) -> dict[str, dict]:
+    def column_map(self) -> dict[str, Any]:
         """Provides the column mapping for all of the available data types with
         the name of each data type as the key and the dictionary mapping as the values.
         """
@@ -1033,11 +1083,11 @@ class PlantMetaData(FromDictMixin):  # noqa: F821
             reanalysis={},
         )
         if self.reanalysis != {}:
-            values["reanalysis"] = {k: v.col_map for k, v in self.reanalysis.items()}
+            values["reanalysis"] = cast(Any, {k: v.col_map for k, v in self.reanalysis.items()})
         return values
 
     @property
-    def dtype_map(self) -> dict[str, dict]:
+    def dtype_map(self) -> dict[str, dict[str, Any]]:
         """Provides the column dtype matching for all of the available data types with
         the name of each data type as the keys, and the column dtype mapping as values.
         """
@@ -1081,7 +1131,8 @@ class PlantMetaData(FromDictMixin):  # noqa: F821
             raise FileExistsError(f"Input JSON file: {metadata_file} is an invalid input.")
 
         with open(metadata_file) as f:
-            return cls.from_dict(json.load(f))
+            data: dict[str, Any] = json.load(f)
+            return cls.from_dict(data)
 
     @classmethod
     def from_yaml(cls, metadata_file: str | Path) -> PlantMetaData:
@@ -1101,10 +1152,11 @@ class PlantMetaData(FromDictMixin):  # noqa: F821
             raise FileExistsError(f"Input YAML file: {metadata_file} is an invalid input.")
 
         with open(metadata_file) as f:
-            return cls.from_dict(yaml.safe_load(f))
+            data: dict[str, Any] = yaml.safe_load(f)
+            return cls.from_dict(data)
 
     @classmethod
-    def load(cls, data: str | Path | dict | PlantMetaData) -> PlantMetaData:
+    def load(cls, data: str | Path | dict[str, Any] | PlantMetaData) -> PlantMetaData:
         """Loads the metadata from either a dictionary or file such as a JSON or YAML file.
 
         Args:
@@ -1159,8 +1211,8 @@ class PlantMetaData(FromDictMixin):  # noqa: F821
             key: {name: value["freq"] for name, value in values.items()}
             for key, values in requirements.items()
         }
-        frequency = {
-            k: []
+        frequency: dict[str, set[str]] = {
+            k: set()
             for k in set(
                 itertools.chain.from_iterable([[*val] for val in frequency_requirements.values()])
             )
@@ -1168,11 +1220,11 @@ class PlantMetaData(FromDictMixin):  # noqa: F821
         for vals in frequency_requirements.values():
             for name, req in vals.items():
                 reqs = frequency[name]
-                if reqs == []:
+                if not reqs:
                     frequency[name] = set(req)
                 else:
                     frequency[name] = reqs.intersection(req)
         return frequency
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return _make_combined_repr(self)
