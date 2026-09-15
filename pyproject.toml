@@ -167,6 +167,10 @@ files = [
   "openoa/analysis/wake_losses.py",
   "openoa/utils/met_data_processing.py",
   "openoa/runners/wake_losses.py",
+  "openoa/analysis/eya_gap_analysis.py",
+  "openoa/plant.py",
+  "openoa/schema/metadata.py",
+  "openoa/runners/eya_gap_analysis.py",
 ]
 
 [[tool.mypy.overrides]]

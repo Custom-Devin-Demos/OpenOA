@@ -7,20 +7,35 @@ estimated and operational-estimated AEP values.
 
 from __future__ import annotations
 
+import logging
+from typing import Any, cast
+
 import attrs
-import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from attrs import field, define
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 from openoa.plant import PlantData
 from openoa.utils import plot
 from openoa.schema import FromDictMixin
-from openoa.logging import logging, logged_method_call
+from openoa.logging import logged_method_call
 from openoa.analysis._analysis_validators import validate_half_closed_0_1_left
 
 logger = logging.getLogger(__name__)
 plot.set_styling()
+
+
+def _to_eya_estimate(value: EYAEstimate | dict[str, Any]) -> EYAEstimate:
+    if isinstance(value, EYAEstimate):
+        return value
+    return EYAEstimate.from_dict(value)
+
+
+def _to_oa_results(value: OAResults | dict[str, Any]) -> OAResults:
+    if isinstance(value, OAResults):
+        return value
+    return OAResults.from_dict(value)
 
 
 @define(auto_attribs=True)
@@ -73,7 +88,7 @@ class OAResults(FromDictMixin):
 
     @availability_losses.validator
     @electrical_losses.validator
-    def validate_0_1(self, attribute: attrs.Attribute, value: float) -> None:
+    def validate_0_1(self, attribute: attrs.Attribute[Any], value: float) -> None:
         """Validates that the provided value is in the range of [0, 1)."""
         if not 0.0 <= value < 1.0:
             raise ValueError(f"The input to '{attribute.name}' must be in the range (0, 1).")
@@ -108,16 +123,16 @@ class EYAGapAnalysis(FromDictMixin):
         oa_results(:obj:`OAResults`): Numpy array with OA results listed in required order.
     """
 
-    plant: PlantData = field(validator=attrs.validators.instance_of((PlantData, type(None))))
-    eya_estimates: EYAEstimate = field(converter=EYAEstimate.from_dict)
-    oa_results: OAResults = field(converter=OAResults.from_dict)
+    plant: PlantData | None = field(validator=attrs.validators.instance_of((PlantData, type(None))))
+    eya_estimates: EYAEstimate = field(converter=_to_eya_estimate)
+    oa_results: OAResults = field(converter=_to_oa_results)
 
     # Internally produced attributes
-    data: list = field(factory=list)
-    compiled_data: list = field(factory=list)
+    data: list[float] = field(factory=list)
+    compiled_data: list[float] = field(factory=list)
 
     @logged_method_call
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         """Initialize EYA gap analysis class with data and parameters."""
         if not (isinstance(self.plant, PlantData) or self.plant is None):
             raise TypeError(
@@ -127,7 +142,7 @@ class EYAGapAnalysis(FromDictMixin):
         logger.info("Initialized EYA Gap Analysis Object")
 
     @logged_method_call
-    def run(self):
+    def run(self) -> None:
         """
         Run the EYA Gap analysis functions in order by calling this function.
 
@@ -142,7 +157,7 @@ class EYAGapAnalysis(FromDictMixin):
         logger.info("Gap analysis complete")
 
     @logged_method_call
-    def compile_data(self):
+    def compile_data(self) -> list[float]:
         """
         Compiles the EYA and OA metrics, and computes the differences.
 
@@ -187,11 +202,11 @@ class EYAGapAnalysis(FromDictMixin):
             "OA AEP",
         ],
         ylabel: str = "Energy (GWh/yr)",
-        ylim: tuple[float, float] = (None, None),
+        ylim: tuple[float | None, float | None] = (None, None),
         return_fig: bool = False,
-        plot_kwargs: dict | None = None,
-        figure_kwargs: dict | None = None,
-    ) -> None | tuple:
+        plot_kwargs: dict[str, Any] | None = None,
+        figure_kwargs: dict[str, Any] | None = None,
+    ) -> None | tuple[Figure, Axes]:
         """
         Produce a waterfall plot showing the progression from the EYA estimates to the calculated OA
         estimates of AEP.
@@ -217,19 +232,22 @@ class EYAGapAnalysis(FromDictMixin):
             None | tuple[plt.Figure, plt.Axes]: If :py:attr:`return_fig`, then return the figure
                 and axes objects in addition to showing the plot.
         """
-        return plot.plot_waterfall(
+        fig_ax = plot.plot_waterfall(
             self.compiled_data,
             index=index,
-            ylim=ylim,
+            ylim=cast(tuple[float, float], ylim),
             ylabel=ylabel,
             return_fig=return_fig,
             plot_kwargs=plot_kwargs,
             figure_kwargs=figure_kwargs,
         )
+        return cast("tuple[Figure, Axes] | None", fig_ax)
 
 
 def create_EYAGapAnalysis(
-    project: PlantData, eya_estimates: dict | EYAEstimate, oa_results: dict | OAResults
+    project: PlantData | None,
+    eya_estimates: dict[str, Any] | EYAEstimate,
+    oa_results: dict[str, Any] | OAResults,
 ) -> EYAGapAnalysis:
     return EYAGapAnalysis(project, eya_estimates, oa_results)
 

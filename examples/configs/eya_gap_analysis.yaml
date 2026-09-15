@@ -1,0 +1,23 @@
+# python -m openoa.cli run eya_gap_analysis --config examples/configs/eya_gap_analysis.yaml --output-dir /tmp/openoa_eya_gap_analysis
+seed: 42
+plant:
+  loader: examples.project_ENGIE:prepare
+  loader_kwargs:
+    path: ../data/la_haute_borne
+    use_cleansed: false
+analysis:
+  # Operational assessment results (from the MonteCarloAEP, TurbineLongTermGrossEnergy and ElectricalLosses methods)
+  oa_results:
+    aep: 448.0
+    availability_losses: 0.0493
+    electrical_losses: 0.012
+    turbine_ideal_energy: 477.8
+  # Consultant energy yield assessment estimates
+  eya_estimates:
+    aep: 467.0
+    gross_energy: 597.14
+    availability_losses: 0.062
+    electrical_losses: 0.024
+    turbine_losses: 0.037
+    blade_degradation_losses: 0.011
+    wake_losses: 0.087
