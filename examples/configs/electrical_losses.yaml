@@ -1,0 +1,14 @@
+# Example configuration for: python -m openoa.cli run electrical_losses --config <this file>
+# Paths are resolved relative to this file's directory.
+seed: 42
+plant:
+  loader: examples.project_ENGIE:prepare
+  loader_kwargs:
+    path: ../data/la_haute_borne
+  analysis_type: ElectricalLosses
+analysis:
+  UQ: true
+  num_sim: 300
+  uncertainty_meter: 0.005
+  uncertainty_scada: 0.005
+  uncertainty_correction_threshold: [0.9, 0.995]

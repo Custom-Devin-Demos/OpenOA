@@ -164,6 +164,9 @@ files = [
   "openoa/schema/schema.py",
   "openoa/analysis/__init__.py",
   "openoa/analysis/_analysis_validators.py",
+  "openoa/analysis/electrical_losses.py",
+  "openoa/utils/plot.py",
+  "openoa/runners/electrical_losses.py",
 ]
 
 [[tool.mypy.overrides]]
