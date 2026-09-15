@@ -1276,7 +1276,7 @@ class PlantData:
         IDs from both the SCADA data and tower data, if `asset` is undefined.
         """
         if self.asset is None:
-            return cast(NDArray[Any], np.concatenate([self.turbine_ids, self.tower_ids]))
+            return np.asarray(np.concatenate([self.turbine_ids, self.tower_ids]))
         return np.asarray(self.asset.index)
 
     # NOTE: v2 AssetData methods
