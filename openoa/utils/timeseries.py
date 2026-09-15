@@ -5,6 +5,7 @@ This module provides useful functions for processing timeseries data
 from __future__ import annotations
 
 import datetime
+from typing import Any, TypeVar, Callable, cast
 
 import numpy as np
 import pandas as pd
@@ -13,8 +14,23 @@ from dateutil.parser import parse
 
 from openoa.utils._converters import series_method
 
+_F = TypeVar("_F", bound=Callable[..., Any])
 
-def offset_to_seconds(offset: int | float | str | np.datetime64) -> int | float:
+
+def _series_method(data_cols: list[str]) -> Callable[[_F], _F]:
+    """Signature-preserving view of :py:func:`openoa.utils._converters.series_method`, which is
+    not yet typed; the wrapper is a pass-through to the decorated function's arguments."""
+    return cast("Callable[[_F], _F]", series_method(data_cols=data_cols))
+
+
+def _as_series(col: pd.Series | str) -> pd.Series:
+    """Narrows a ``series_method`` argument to the pandas ``Series`` the wrapper guarantees."""
+    if isinstance(col, str):
+        raise TypeError(f"Column name '{col}' was provided without the `data` argument.")
+    return col
+
+
+def offset_to_seconds(offset: int | float | str | np.timedelta64) -> int | float:
     """Converts pandas datetime offset alias to its corresponding number of seconds.
 
     Args:
@@ -25,10 +41,13 @@ def offset_to_seconds(offset: int | float | str | np.datetime64) -> int | float:
     Returns:
         :obj:`int` | `float`: The number of seconds corresponding to :py:attr:`offset`.
     """
+    value: int | float | str | pd.Timedelta = (
+        pd.Timedelta(offset) if isinstance(offset, np.timedelta64) else offset
+    )
     try:
-        seconds = pd.to_timedelta(offset).total_seconds()
+        seconds = pd.to_timedelta(value).total_seconds()
     except ValueError:  # Needs a leading number or the above will fail
-        seconds = pd.to_timedelta(f"1{offset}").total_seconds()
+        seconds = pd.to_timedelta(f"1{value}").total_seconds()
     return seconds
 
 
@@ -48,7 +67,7 @@ def determine_frequency_seconds(data: pd.DataFrame, index_col: str | None = None
     index = data.index if index_col is None else data.index.get_level_values(index_col)
     index = index.unique()
 
-    unique_diffs, counts = np.unique(np.diff(index), return_counts=True)
+    unique_diffs, counts = np.unique(np.diff(index.to_numpy()), return_counts=True)
     return offset_to_seconds(unique_diffs[np.argmax(counts)])
 
 
@@ -66,16 +85,21 @@ def determine_frequency(data: pd.DataFrame, index_col: str | None = None) -> str
     """
     # Get the timetamp index values
     index = data.index if index_col is None else data.index.get_level_values(index_col)
+    if not isinstance(index, pd.DatetimeIndex):
+        raise TypeError("The index of `data` (or its `index_col` level) must be a DatetimeIndex.")
 
     # Check for an offset string being available
-    freq = index.freqstr
+    freq: str | None = index.freqstr
     if freq is None:
-        freq = pd.infer_freq(data.index.get_level_values("time"))
+        time_index = data.index.get_level_values("time")
+        if not isinstance(time_index, pd.DatetimeIndex):
+            raise TypeError("The 'time' index level of `data` must be a DatetimeIndex.")
+        freq = pd.infer_freq(time_index)
 
     # If there is at least one missing data point, or timestamp misalignment, the above will fail,
     # so
     if freq is None:
-        freq = determine_frequency_seconds(data, index_col)
+        return determine_frequency_seconds(data, index_col)
     return freq
 
 
@@ -114,9 +138,9 @@ def convert_local_to_utc(d: str | datetime.datetime, tz_string: str) -> datetime
     return d_local.astimezone(utc)  # calculate UTC time
 
 
-@series_method(data_cols=["dt_col"])
+@_series_method(data_cols=["dt_col"])
 def convert_dt_to_utc(
-    dt_col: pd.Series | str, tz_string: str, data: pd.DataFrame = None
+    dt_col: pd.Series | str, tz_string: str, data: pd.DataFrame | None = None
 ) -> pd.Series:
     """Converts a pandas ``Series`` of timestamps, string-formatted or ``datetime.datetime`` objects
         that are in a local timezone ``tz_string`` to a UTC encoded pandas ``Series``.
@@ -131,18 +155,24 @@ def convert_dt_to_utc(
     Returns:
         pd.Series: _description_
     """
-    if isinstance(dt_col[0], str):
-        dt_col = dt_col.apply(parse)
+    series = _as_series(dt_col)
+    if isinstance(series[0], str):
+        series = series.apply(parse)
 
     # If the timezone information is already encoded, then convert it to a UTC-converted
     # pandas datetime object automatically, otherwise, localize it, then convert it
-    if dt_col[0].tzinfo is not None:
-        return pd.to_datetime(dt_col, utc=True)
-    return dt_col.dt.tz_localize(tz_string, ambiguous=True).dt.tz_convert(utc)
+    first: datetime.datetime = series[0]
+    if first.tzinfo is not None:
+        converted: pd.Series = pd.to_datetime(series, utc=True)
+        return converted
+    localized: pd.Series = series.dt.tz_localize(tz_string, ambiguous=True).dt.tz_convert(utc)
+    return localized
 
 
-@series_method(data_cols=["dt_col"])
-def find_time_gaps(dt_col: pd.Series | str, freq: str, data: pd.DataFrame = None) -> pd.Series:
+@_series_method(data_cols=["dt_col"])
+def find_time_gaps(
+    dt_col: pd.Series | pd.DatetimeIndex | str, freq: str, data: pd.DataFrame | None = None
+) -> pd.Series:
     """
     Finds gaps in `dt_col` based on the expected frequency, `freq`, and returns them.
 
@@ -159,6 +189,7 @@ def find_time_gaps(dt_col: pd.Series | str, freq: str, data: pd.DataFrame = None
     """
     if isinstance(dt_col, pd.DatetimeIndex):
         dt_col = dt_col.to_series()
+    dt_col = _as_series(dt_col)
 
     # If the difference for all of the timestamps is the expected frequency, 0 (duplicate), or a NaT
     # (first element of `diff`), then return an empty series
@@ -170,8 +201,10 @@ def find_time_gaps(dt_col: pd.Series | str, freq: str, data: pd.DataFrame = None
     return pd.Series(tuple(set(range_dt).difference(dt_col)), name=dt_col.name)
 
 
-@series_method(data_cols=["dt_col"])
-def find_duplicate_times(dt_col: pd.Series | str, data: pd.DataFrame = None):
+@_series_method(data_cols=["dt_col"])
+def find_duplicate_times(
+    dt_col: pd.Series | pd.DatetimeIndex | str, data: pd.DataFrame | None = None
+) -> pd.Series:
     """
     Find duplicate input data and report them. The first duplicated item is not reported, only subsequent duplicates.
 
@@ -186,6 +219,7 @@ def find_duplicate_times(dt_col: pd.Series | str, data: pd.DataFrame = None):
     """
     if isinstance(dt_col, pd.DatetimeIndex):
         dt_col = dt_col.to_series()
+    dt_col = _as_series(dt_col)
 
     return dt_col[dt_col.duplicated()]
 
@@ -225,8 +259,8 @@ def gap_fill_data_frame(data: pd.DataFrame, dt_col: str, freq: str) -> pd.DataFr
         )
 
 
-@series_method(data_cols=["col"])
-def percent_nan(col: pd.Series | str, data: pd.DataFrame = None):
+@_series_method(data_cols=["col"])
+def percent_nan(col: pd.Series | str, data: pd.DataFrame | None = None) -> float:
     """
     Return percentage of data that are Nan or 1 if the series is empty.
 
@@ -239,11 +273,14 @@ def percent_nan(col: pd.Series | str, data: pd.DataFrame = None):
     Returns:
         :obj:`float`: Percentage of NaN data in the data series
     """
-    return 1 if (denominator := float(col.size)) == 0 else np.isnan(col.values).sum() / denominator
+    col = _as_series(col)
+    if (denominator := float(col.size)) == 0:
+        return 1
+    return int(np.isnan(col.to_numpy()).sum()) / denominator
 
 
-@series_method(data_cols=["dt_col"])
-def num_days(dt_col: pd.Series | str, data: pd.DataFrame = None) -> int:
+@_series_method(data_cols=["dt_col"])
+def num_days(dt_col: pd.Series | str, data: pd.DataFrame | None = None) -> int:
     """
     Calculates the number of non-duplicate days in :py:attr:`dt_col`.
 
@@ -256,11 +293,12 @@ def num_days(dt_col: pd.Series | str, data: pd.DataFrame = None) -> int:
     Returns:
         :obj:`int`: Number of days in the data
     """
+    dt_col = _as_series(dt_col)
     return dt_col[~dt_col.index.duplicated()].resample("D").asfreq().index.size
 
 
-@series_method(data_cols=["dt_col"])
-def num_hours(dt_col: pd.Series | str, *, data: pd.DataFrame = None) -> int:
+@_series_method(data_cols=["dt_col"])
+def num_hours(dt_col: pd.Series | str, *, data: pd.DataFrame | None = None) -> int:
     """
     Calculates the number of non-duplicate hours in `dt_col`.
 
@@ -273,4 +311,5 @@ def num_hours(dt_col: pd.Series | str, *, data: pd.DataFrame = None) -> int:
     Returns:
         :obj:`int`: Number of hours in the data
     """
+    dt_col = _as_series(dt_col)
     return dt_col[~dt_col.index.duplicated()].resample("h").asfreq().index.size
