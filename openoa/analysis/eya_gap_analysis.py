@@ -232,19 +232,16 @@ class EYAGapAnalysis(FromDictMixin):
             None | tuple[plt.Figure, plt.Axes]: If :py:attr:`return_fig`, then return the figure
                 and axes objects in addition to showing the plot.
         """
-        result: None | tuple[Figure, Axes] = cast(
-            None | tuple[Figure, Axes],
-            plot.plot_waterfall(
-                self.compiled_data,
-                index=index,
-                ylim=cast(tuple[float, float], ylim),
-                ylabel=ylabel,
-                return_fig=return_fig,
-                plot_kwargs=plot_kwargs,
-                figure_kwargs=figure_kwargs,
-            ),
+        fig_ax = plot.plot_waterfall(
+            self.compiled_data,
+            index=index,
+            ylim=cast(tuple[float, float], ylim),
+            ylabel=ylabel,
+            return_fig=return_fig,
+            plot_kwargs=plot_kwargs,
+            figure_kwargs=figure_kwargs,
         )
-        return result
+        return cast("tuple[Figure, Axes] | None", fig_ax)
 
 
 def create_EYAGapAnalysis(

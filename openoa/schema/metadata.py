@@ -7,7 +7,7 @@ import warnings
 import itertools
 from copy import deepcopy
 from string import digits
-from typing import Any, Literal, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 from pathlib import Path
 
 import yaml
@@ -299,6 +299,7 @@ def determine_analysis_requirements(
 T = TypeVar("T", bound="FromDictMixin")
 
 
+@define(auto_attribs=True)
 class FromDictMixin:
     """A Mixin class to allow for kwargs overloading when a data class doesn't
     have a specific parameter definied. This allows passing of larger dictionaries
@@ -320,7 +321,7 @@ class FromDictMixin:
             (cls): An intialized object of the `attrs`-defined class (`cls`).
         """
         # Get all parameters from the input dictionary that map to the class initialization
-        kwarg_names = [a.name for a in attrs.fields(cast(Any, cls)) if a.init]
+        kwarg_names = [a.name for a in attrs.fields(cls) if a.init]
         matching = [name for name in kwarg_names if name in data]
         non_matching = [name for name in data if name not in kwarg_names]
         logger.info(f"No matches for provided kwarg inputs: {non_matching}")
@@ -328,7 +329,7 @@ class FromDictMixin:
 
         # Map the inputs must be provided: 1) must be initialized, 2) no default value defined
         required_inputs = [
-            a.name for a in attrs.fields(cast(Any, cls)) if a.init and a.default is attrs.NOTHING
+            a.name for a in attrs.fields(cls) if a.init and a.default is attrs.NOTHING
         ]
         undefined = sorted(set(required_inputs) - set(kwargs))
         if undefined:
@@ -344,6 +345,9 @@ class ResetValuesMixin:
     A MixinClass that provides the methods to reset initialized or default values for analysis
     parameters.
     """
+
+    if TYPE_CHECKING:
+        run_parameters: list[str]
 
     @logged_method_call
     def set_values(self, value_dict: dict[str, Any]) -> None:
@@ -369,7 +373,7 @@ class ResetValuesMixin:
         """
         logger.info("Resetting run parameters back to the class defaults")
         # Define the analysis class run parameters
-        valid: list[str] = getattr(self, "run_parameters")
+        valid: list[str] = self.run_parameters
 
         # If None, set to all run parameterizations
         if which is None:
@@ -384,7 +388,18 @@ class ResetValuesMixin:
         self.set_values(reset_dict)
 
 
-def _make_single_repr(name: str, meta_class: Any) -> str:
+def _make_single_repr(
+    name: str,
+    meta_class: (
+        SCADAMetaData
+        | MeterMetaData
+        | TowerMetaData
+        | StatusMetaData
+        | CurtailMetaData
+        | AssetMetaData
+        | ReanalysisMetaData
+    ),
+) -> str:
     summary = pd.concat(
         [
             pd.DataFrame.from_dict(meta_class.col_map, orient="index", columns=["Column Name"]),
@@ -406,7 +421,7 @@ def _make_single_repr(name: str, meta_class: Any) -> str:
     else:
         repr = ["-" * len(name), name, "-" * len(name) + "\n"]
 
-    if name != "AssetMetaData":
+    if not isinstance(meta_class, AssetMetaData):
         repr.append("frequency\n--------")
         repr.append(meta_class.frequency)
 
@@ -1069,11 +1084,11 @@ class PlantMetaData(FromDictMixin):  # noqa: F821
     )  # noqa: F821
 
     @property
-    def column_map(self) -> dict[str, Any]:
+    def column_map(self) -> dict[str, dict[str, Any]]:
         """Provides the column mapping for all of the available data types with
         the name of each data type as the key and the dictionary mapping as the values.
         """
-        values = dict(
+        values: dict[str, dict[str, Any]] = dict(
             scada=self.scada.col_map,
             meter=self.meter.col_map,
             tower=self.tower.col_map,
@@ -1083,7 +1098,7 @@ class PlantMetaData(FromDictMixin):  # noqa: F821
             reanalysis={},
         )
         if self.reanalysis != {}:
-            values["reanalysis"] = cast(Any, {k: v.col_map for k, v in self.reanalysis.items()})
+            values["reanalysis"] = {k: v.col_map for k, v in self.reanalysis.items()}
         return values
 
     @property
