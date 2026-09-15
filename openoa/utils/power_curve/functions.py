@@ -5,29 +5,70 @@ python function which can be used to evaluate the power curve at arbitrary locat
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, TypeVar, Callable, cast
 
 import numpy as np
 import pandas as pd
+import numpy.typing as npt
 from pygam import LinearGAM
 from scipy.optimize import differential_evolution
 from scipy.interpolate import interp1d
 
 from openoa.utils._converters import series_method, dataframe_method
 from openoa.utils.power_curve.parametric_forms import logistic5param
-from openoa.utils.power_curve.parametric_optimize import least_squares, fit_parametric_power_curve
+from openoa.utils.power_curve.parametric_optimize import (
+    ArrayInput,
+    PowerCurve,
+    least_squares,
+    fit_parametric_power_curve,
+)
+
+NDArrayFloat = npt.NDArray[np.float64]
+# Decorator type variable: the wrapped signature is arbitrary, so the bound must be `Callable[..., Any]`
+F = TypeVar("F", bound=Callable[..., Any])
 
 
-@series_method(data_cols=["windspeed_col", "power_col"])
+def _series_method(data_cols: list[str]) -> Callable[[F], F]:
+    """Typed view of :py:func:`openoa.utils._converters.series_method`, which preserves the
+    decorated function's signature at runtime through ``functools.wraps``."""
+    return cast(Callable[[F], F], series_method(data_cols=data_cols))
+
+
+def _dataframe_method(data_cols: list[str]) -> Callable[[F], F]:
+    """Typed view of :py:func:`openoa.utils._converters.dataframe_method`, which preserves the
+    decorated function's signature at runtime through ``functools.wraps``."""
+    return cast(Callable[[F], F], dataframe_method(data_cols=data_cols))
+
+
+def _as_series(column: str | pd.Series[float]) -> pd.Series[float]:
+    """The ``series_method`` decorator has already converted any column name to its ``Series``
+    by the time the wrapped function body runs, so the ``str`` branch of the union is unreachable.
+    """
+    return cast("pd.Series[float]", column)
+
+
+def _as_dataframe(data: pd.DataFrame | None) -> pd.DataFrame:
+    """The ``dataframe_method`` decorator always supplies ``data`` (building it from the input
+    ``Series`` when needed) by the time the wrapped function body runs."""
+    return cast(pd.DataFrame, data)
+
+
+def _as_column_name(column: str | pd.Series[float]) -> str:
+    """The ``dataframe_method`` decorator has already converted any ``Series`` to its column name
+    in ``data`` by the time the wrapped function body runs."""
+    return cast(str, column)
+
+
+@_series_method(data_cols=["windspeed_col", "power_col"])
 def IEC(
-    windspeed_col: str | pd.Series,
-    power_col: str | pd.Series,
+    windspeed_col: str | pd.Series[float],
+    power_col: str | pd.Series[float],
     bin_width: float = 0.5,
     windspeed_start: float = 0,
     windspeed_end: float = 30.0,
     interpolate: bool = False,
-    data: pd.DataFrame = None,
-) -> Callable:
+    data: pd.DataFrame | None = None,
+) -> PowerCurve:
     """
     Use IEC 61400-12-1-2 method for creating a binned wind-speed power curve. Power is set to zero
     for values outside the cutoff range: [:py:attr:`windspeed_start`, :py:attr:`windspeed_end`].
@@ -50,25 +91,29 @@ def IEC(
         :obj:`Callable`: Python function of type (Array[float] -> Array[float]) implementing the power curve.
 
     """
+    windspeed = _as_series(windspeed_col)
+    power = _as_series(power_col)
 
     # Set up evenly spaced bins of fixed width, with any value over the maximum getting np.inf
     n_bins = int(np.ceil((windspeed_end - windspeed_start) / bin_width)) + 1
-    bins = np.append(np.linspace(windspeed_start, windspeed_end, n_bins), [np.inf])
+    bins: NDArrayFloat = np.append(np.linspace(windspeed_start, windspeed_end, n_bins), [np.inf])
 
     # Initialize an array which will hold the mean values of each bin
-    P_bin = np.ones(len(bins) - 1) * np.nan
+    P_bin_raw: NDArrayFloat = np.ones(len(bins) - 1) * np.nan
 
     # Compute the mean of each bin and set corresponding P_bin
     for ibin in range(0, len(bins) - 1):
-        indices = (windspeed_col >= bins[ibin]) & (windspeed_col < bins[ibin + 1])
-        P_bin[ibin] = power_col.loc[indices].mean()
+        indices = (windspeed >= bins[ibin]) & (windspeed < bins[ibin + 1])
+        P_bin_raw[ibin] = power.loc[indices].mean()
 
     # Linearly interpolate any missing bins
-    P_bin = pd.Series(data=P_bin).interpolate(method="linear").bfill().values
+    P_bin: NDArrayFloat = np.asarray(
+        pd.Series(data=P_bin_raw).interpolate(method="linear").bfill().to_numpy(), dtype=np.float64
+    )
 
     # Create a closure over the computed bins which computes the power curve value for arbitrary array-like input
-    def pc_iec_bin(x):
-        P = np.zeros(np.shape(x))
+    def pc_iec_bin(x: ArrayInput) -> NDArrayFloat:
+        P: NDArrayFloat = np.zeros(np.shape(x))
         for i in range(0, len(bins) - 1):
             idx = np.where((x >= bins[i]) & (x < bins[i + 1]))
             P[idx] = P_bin[i]
@@ -76,14 +121,14 @@ def IEC(
         P[cutoff_idx] = 0.0
         return P
 
-    def pc_iec_interp(x):
+    def pc_iec_interp(x: ArrayInput) -> NDArrayFloat:
         f = interp1d(
             bins[0:-1] + 0.5 / 2,
             P_bin,
             fill_value=(P_bin[0], P_bin[-1]),
             bounds_error=False,
         )
-        P = f(x)
+        P: NDArrayFloat = f(x)
         cutoff_idx = (x < windspeed_start) | (x > windspeed_end)
         P[cutoff_idx] = 0.0
         return P
@@ -94,10 +139,12 @@ def IEC(
         return pc_iec_bin
 
 
-@series_method(data_cols=["windspeed_col", "power_col"])
+@_series_method(data_cols=["windspeed_col", "power_col"])
 def logistic_5_parametric(
-    windspeed_col: str | pd.Series, power_col: str | pd.Series, data: pd.DataFrame = None
-) -> Callable:
+    windspeed_col: str | pd.Series[float],
+    power_col: str | pd.Series[float],
+    data: pd.DataFrame | None = None,
+) -> PowerCurve:
     """In this case, the function fits the 5 parameter logistics function to observed data via a
     least-squares optimization (i.e. minimizing the sum of the squares of the residual between the
     points as evaluated by the parameterized function and the points of observed data).
@@ -134,23 +181,25 @@ def logistic_5_parametric(
         :obj:`function`: Python function of type (Array[float] -> Array[float]) implementing the power curve.
 
     """
-    return fit_parametric_power_curve(
-        windspeed_col,
-        power_col,
+    curve = fit_parametric_power_curve(
+        _as_series(windspeed_col),
+        _as_series(power_col),
         curve=logistic5param,
         optimization_algorithm=differential_evolution,
         cost_function=least_squares,
         bounds=((1200, 1800), (-10, -1e-3), (1e-3, 30), (1e-3, 1), (1e-3, 10)),
     )
+    # `return_params` is False, so only the fitted curve is returned
+    return cast(PowerCurve, curve)
 
 
-@series_method(data_cols=["windspeed_col", "power_col"])
+@_series_method(data_cols=["windspeed_col", "power_col"])
 def gam(
-    windspeed_col: str | pd.Series,
-    power_col: str | pd.Series,
+    windspeed_col: str | pd.Series[float],
+    power_col: str | pd.Series[float],
     n_splines: int = 20,
-    data: pd.DataFrame = None,
-) -> Callable:
+    data: pd.DataFrame | None = None,
+) -> PowerCurve:
     """
     Use the generalized additive model, :py:class:`pygam.LinearGAM` to fit power to wind speed.
 
@@ -167,19 +216,27 @@ def gam(
         :obj:`Callable`: Python function of type (Array[float] -> Array[float]) implementing the power curve.
 
     """
-    # Fit the model
-    return LinearGAM(n_splines=n_splines).fit(windspeed_col.values, power_col.values).predict
+    # Fit the model; pygam is untyped so the bound `predict` method is cast to the power curve type
+    model = LinearGAM(n_splines=n_splines).fit(
+        _as_series(windspeed_col).values, _as_series(power_col).values
+    )
+    return cast(PowerCurve, model.predict)
 
 
-@dataframe_method(data_cols=["windspeed_col", "wind_direction_col", "air_density_col", "power_col"])
+GAM3ParamPredictor = Callable[..., NDArrayFloat]
+
+
+@_dataframe_method(
+    data_cols=["windspeed_col", "wind_direction_col", "air_density_col", "power_col"]
+)
 def gam_3param(
-    windspeed_col: str | pd.Series,
-    wind_direction_col: str | pd.Series,
-    air_density_col: str | pd.Series,
-    power_col: str | pd.Series,
+    windspeed_col: str | pd.Series[float],
+    wind_direction_col: str | pd.Series[float],
+    air_density_col: str | pd.Series[float],
+    power_col: str | pd.Series[float],
     n_splines: int = 20,
-    data: pd.DataFrame = None,
-) -> Callable:
+    data: pd.DataFrame | None = None,
+) -> GAM3ParamPredictor:
     """
     Use a generalized additive model to fit power to wind speed, wind direction and air density.
 
@@ -201,21 +258,35 @@ def gam_3param(
         :obj:`Callable`: Python function of type (Array[float] -> Array[float]) implementing the power curve.
     """
     # create dataframe input to LinearGAM and predicted response variable
-    X = data[[windspeed_col, wind_direction_col, air_density_col]]
-    y = data[power_col]
+    df = _as_dataframe(data)
+    X = df[
+        [
+            _as_column_name(windspeed_col),
+            _as_column_name(wind_direction_col),
+            _as_column_name(air_density_col),
+        ]
+    ]
+    y = df[_as_column_name(power_col)]
 
     # Fit the model
     model = LinearGAM(n_splines=n_splines).fit(X, y)
 
     # Wrap the prediction function in a closure to pack input variables
-    @dataframe_method(data_cols=["windspeed_col", "wind_direction_col", "air_density_col"])
+    @_dataframe_method(data_cols=["windspeed_col", "wind_direction_col", "air_density_col"])
     def predict(
-        windspeed_col: str | pd.Series,
-        wind_direction_col: str | pd.Series,
-        air_density_col: str | pd.Series,
-        data: pd.DataFrame = None,
-    ):
-        X = data[[windspeed_col, wind_direction_col, air_density_col]]
-        return model.predict(X)
+        windspeed_col: str | pd.Series[float],
+        wind_direction_col: str | pd.Series[float],
+        air_density_col: str | pd.Series[float],
+        data: pd.DataFrame | None = None,
+    ) -> NDArrayFloat:
+        X = _as_dataframe(data)[
+            [
+                _as_column_name(windspeed_col),
+                _as_column_name(wind_direction_col),
+                _as_column_name(air_density_col),
+            ]
+        ]
+        # pygam is untyped, so the prediction is cast to the array it returns at runtime
+        return cast(NDArrayFloat, model.predict(X))
 
     return predict

@@ -8,8 +8,9 @@ output is a 'waterfall' plot linking the EYA-estimated and operational-estiamted
 from __future__ import annotations
 
 import random
+import logging
 from copy import deepcopy
-from typing import Callable
+from typing import Any, TypeVar, cast
 
 import attrs
 import numpy as np
@@ -18,6 +19,8 @@ import numpy.typing as npt
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from attrs import field, define
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.ticker import StrMethodFormatter
 
 from openoa.plant import PlantData, convert_to_list
@@ -25,7 +28,7 @@ from openoa.utils import plot, filters, imputing
 from openoa.utils import timeseries as ts
 from openoa.utils import met_data_processing as met
 from openoa.schema import FromDictMixin, ResetValuesMixin
-from openoa.logging import logging, logged_method_call
+from openoa.logging import logged_method_call
 from openoa.utils.power_curve import functions
 from openoa.analysis._analysis_validators import (
     validate_UQ_input,
@@ -37,9 +40,42 @@ logger = logging.getLogger(__name__)
 plot.set_styling()
 
 NDArrayFloat = npt.NDArray[np.float64]
+Threshold = float | tuple[float, float]
+PlotLimits = tuple[float | None, float | None]
+# Keyword arguments passed straight through to matplotlib, whose accepted values are open-ended.
+PlotKwargs = dict[str, Any]
 
 MINUTES_PER_HOUR = 60
 HOURS_PER_DAY = 24
+
+_T = TypeVar("_T")
+
+
+def _copy_plant(plant: PlantData) -> PlantData:
+    return deepcopy(plant)
+
+
+def _required(value: _T | None, name: str) -> _T:
+    """Narrows the optional ``PlantData`` attributes that are guaranteed by ``PlantData.validate``."""
+    if value is None:
+        raise ValueError(f"`plant.{name}` is required for the TurbineLongTermGrossEnergy analysis.")
+    return value
+
+
+def _uq_bounds(value: Threshold) -> tuple[int, int]:
+    """Narrows a UQ parameter to its (lower, upper) percentage bounds, as ensured by
+    ``validate_UQ_input``. Truncation to ``int`` mirrors ``numpy.random.randint``'s own handling
+    of float bounds.
+    """
+    if isinstance(value, (int, float)):
+        raise ValueError(f"When UQ is True, {value} must be a tuple of length 2.")
+    return int(value[0] * 100), int(value[1] * 100)
+
+
+def _as_bool_series(flag: pd.Series[Any] | pd.DataFrame) -> pd.Series[bool]:
+    """Narrows the ``Series | DataFrame`` return of the ``openoa.utils.filters`` flag functions to
+    the boolean ``Series`` they produce for ``Series`` inputs."""
+    return cast("pd.Series[bool]", flag)
 
 
 @define(auto_attribs=True)
@@ -94,7 +130,9 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
             be used. Defaults to (0.85, 0.95)
     """
 
-    plant: PlantData = field(converter=deepcopy, validator=attrs.validators.instance_of(PlantData))
+    plant: PlantData = field(
+        converter=_copy_plant, validator=attrs.validators.instance_of(PlantData)
+    )
     UQ: bool = field(default=True, converter=bool)
     num_sim: int = field(default=20000, converter=int)
     reanalysis_products: list[str] = field(
@@ -109,34 +147,36 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
         ),
     )
     uncertainty_scada: float = field(default=0.005, converter=float)
-    wind_bin_threshold: NDArrayFloat = field(default=(1.0, 3.0), validator=validate_UQ_input)
-    max_power_filter: NDArrayFloat = field(
+    wind_bin_threshold: Threshold = field(default=(1.0, 3.0), validator=validate_UQ_input)
+    max_power_filter: Threshold = field(
         default=(0.8, 0.9), validator=(validate_UQ_input, validate_half_closed_0_1_right)
     )
-    correction_threshold: NDArrayFloat = field(
+    correction_threshold: Threshold = field(
         default=(0.85, 0.95), validator=(validate_UQ_input, validate_half_closed_0_1_right)
     )
 
     # Internally created attributes need to be given a type before usage
     por_start: pd.Timestamp = field(init=False)
     por_end: pd.Timestamp = field(init=False)
-    turbine_ids: np.ndarray = field(init=False)
+    turbine_ids: npt.NDArray[np.str_] = field(init=False)
     scada: pd.DataFrame = field(init=False)
-    scada_dict: dict = field(factory=dict, init=False)
-    daily_reanal_dict: dict = field(factory=dict, init=False)
-    model_dict: dict = field(factory=dict, init=False)
-    model_results: dict = field(factory=dict, init=False)
+    scada_dict: dict[str, pd.DataFrame] = field(factory=dict, init=False)
+    daily_reanal_dict: dict[str, pd.DataFrame] = field(factory=dict, init=False)
+    model_dict: dict[str, pd.DataFrame] = field(factory=dict, init=False)
+    model_results: dict[str, functions.GAM3ParamPredictor] = field(factory=dict, init=False)
     scada_daily_valid: pd.DataFrame = field(default=pd.DataFrame(), init=False)
     reanalysis_memo: dict[str, pd.DataFrame] = field(factory=dict, init=False)
-    daily_reanalysis: dict[str, pd.DataFrame] = field(factory=dict, init=False)
-    _run: pd.DataFrame = field(init=False)
+    daily_reanalysis: pd.DataFrame = field(init=False)
+    # `_run` is a heterogeneous row (str product name plus float parameters) of `_inputs`, so the
+    # element type is genuinely `Any`.
+    _run: pd.Series[Any] = field(init=False)
     _inputs: pd.DataFrame = field(init=False)
     scada_valid: pd.DataFrame = field(init=False)
     turbine_model_dict: dict[str, pd.DataFrame] = field(factory=dict, init=False)
-    _model_results: dict[str, Callable] = field(factory=dict, init=False)
+    _model_results: dict[str, functions.GAM3ParamPredictor] = field(factory=dict, init=False)
     turb_lt_gross: pd.DataFrame = field(default=pd.DataFrame(), init=False)
     summary_results: pd.DataFrame = field(init=False)
-    plant_gross: dict[int, pd.DataFrame] = field(factory=dict, init=False)
+    plant_gross: NDArrayFloat = field(init=False)
     run_parameters: list[str] = field(
         init=False,
         default=[
@@ -150,12 +190,13 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
     )
 
     @logged_method_call
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         """
         Runs any non-automated setup steps for the analysis class.
         """
-        if {"TurbineLongTermGrossEnergy", "all"}.intersection(self.plant.analysis_type) == set():
-            self.plant.analysis_type.append("TurbineLongTermGrossEnergy")
+        analysis_types = _required(self.plant.analysis_type, "analysis_type")
+        if {"TurbineLongTermGrossEnergy", "all"}.intersection(analysis_types) == set():
+            analysis_types.append("TurbineLongTermGrossEnergy")
 
         # Ensure the data are up to spec before continuing with initialization
         self.plant.validate()
@@ -171,8 +212,9 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
         self.turbine_ids = self.plant.turbine_ids
 
         # Get start and end of POR days in SCADA
-        self.por_start = self.plant.scada.index.get_level_values("time").min()
-        self.por_end = self.plant.scada.index.get_level_values("time").max()
+        scada_times = _required(self.plant.scada, "scada").index.get_level_values("time")
+        self.por_start = scada_times.min()
+        self.por_end = scada_times.max()
 
         # Initially sort the different turbine data into dictionary entries
         logger.info("Processing SCADA data into dictionaries by turbine (this can take a while)")
@@ -216,7 +258,7 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
                 tuple of the lower and upper limits of this threshold, otherwise a single value should
                 be used. Defaults to (0.85, 0.95)
         """
-        initial_parameters = {}
+        initial_parameters: dict[str, list[str] | Threshold] = {}
         if num_sim is not None:
             if self.UQ:
                 self.num_sim = num_sim
@@ -265,28 +307,32 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
         Create and populate the data frame defining the simulation parameters.
         This data frame is stored as self._inputs
         """
+        inputs: dict[str, object]
         if self.UQ:
             reanal_list = list(
                 np.repeat(self.reanalysis_products, self.num_sim)
             )  # Create extra long list of renanalysis product names to sample from
+            wind_bin_threshold = _uq_bounds(self.wind_bin_threshold)
+            max_power_filter = _uq_bounds(self.max_power_filter)
+            correction_threshold = _uq_bounds(self.correction_threshold)
             inputs = {
                 "reanalysis_product": np.asarray(random.sample(reanal_list, self.num_sim)),
                 "scada_data_fraction": np.random.normal(1, self.uncertainty_scada, self.num_sim),
                 "wind_bin_thresh": np.random.randint(
-                    self.wind_bin_threshold[0] * 100,
-                    self.wind_bin_threshold[1] * 100,
+                    wind_bin_threshold[0],
+                    wind_bin_threshold[1],
                     self.num_sim,
                 )
                 / 100.0,
                 "max_power_filter": np.random.randint(
-                    self.max_power_filter[0] * 100,
-                    self.max_power_filter[1] * 100,
+                    max_power_filter[0],
+                    max_power_filter[1],
                     self.num_sim,
                 )
                 / 100.0,
                 "correction_threshold": np.random.randint(
-                    self.correction_threshold[0] * 100,
-                    self.correction_threshold[1] * 100,
+                    correction_threshold[0],
+                    correction_threshold[1],
                     self.num_sim,
                 )
                 / 100.0,
@@ -311,7 +357,7 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
         Sorts the SCADA DataFrame by the asset_id and timestamp index columns, respectively.
         """
 
-        df = self.plant.scada.copy()
+        df = _required(self.plant.scada, "scada").copy()
         dic = self.scada_dict
 
         # Loop through turbine IDs
@@ -338,14 +384,15 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
         """
 
         dic = self.scada_dict
+        asset = _required(self.plant.asset, "asset")
 
         # Loop through turbines
         for t in self.turbine_ids:
             scada_df = self.scada_dict[t]
-            turbine_capacity = self.plant.asset.loc[t, "rated_power"]
+            turbine_capacity = cast(float, asset.loc[t, "rated_power"])
 
             max_bin = (
-                self._run.max_power_filter * turbine_capacity
+                self._run["max_power_filter"] * turbine_capacity
             )  # Set maximum range for using bin-filter
 
             scada_df.dropna(
@@ -353,9 +400,15 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
             )  # Drop any data where scada wind speed or energy is NaN
 
             scada_df = scada_df.assign(
-                flag_neg=filters.range_flag(scada_df.WTUR_W, lower=0, upper=scada_df.WTUR_W.max()),
-                flag_range=filters.range_flag(scada_df.WMET_HorWdSpd, lower=0, upper=40),
-                flag_frozen=filters.unresponsive_flag(scada_df.WMET_HorWdSpd, threshold=3),
+                flag_neg=_as_bool_series(
+                    filters.range_flag(scada_df.WTUR_W, lower=0, upper=scada_df.WTUR_W.max())
+                ),
+                flag_range=_as_bool_series(
+                    filters.range_flag(scada_df.WMET_HorWdSpd, lower=0, upper=40)
+                ),
+                flag_frozen=_as_bool_series(
+                    filters.unresponsive_flag(scada_df.WMET_HorWdSpd, threshold=3)
+                ),
                 flag_window=filters.window_range_flag(
                     window_col=dic[t].loc[:, "WMET_HorWdSpd"],
                     window_start=5.0,
@@ -368,7 +421,7 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
                     bin_col=dic[t].loc[:, "WTUR_W"],
                     value_col=dic[t].loc[:, "WMET_HorWdSpd"],
                     bin_width=0.06 * turbine_capacity,
-                    threshold=self._run.wind_bin_thresh,
+                    threshold=self._run["wind_bin_thresh"],
                     center_type="median",
                     bin_min=np.round(0.01 * turbine_capacity),
                     bin_max=np.round(max_bin),
@@ -390,12 +443,13 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
         Process reanalysis data to daily means for later use in the GAM model.
         """
         # Memoize the function so you don't have to recompute the same reanalysis product twice
-        if (df_daily := self.reanalysis_memo.get(self._run.reanalysis_product, None)) is not None:
+        product = cast(str, self._run["reanalysis_product"])
+        if (df_daily := self.reanalysis_memo.get(product, None)) is not None:
             self.daily_reanalysis = df_daily.copy()
             return
 
         # Capture the runs reanalysis data set and ensure the U/V components exist
-        reanalysis_df = self.plant.reanalysis[self._run.reanalysis_product]
+        reanalysis_df = _required(self.plant.reanalysis, "reanalysis")[product]
         if len({"WMETR_HorWdSpdU", "WMETR_HorWdSpdV"}.intersection(reanalysis_df.columns)) < 2:
             (
                 reanalysis_df["WMETR_HorWdSpdU"],
@@ -411,7 +465,7 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
         self.daily_reanalysis = df_daily
 
         # Store the results for re-use
-        self.reanalysis_memo[self._run.reanalysis_product] = df_daily
+        self.reanalysis_memo[product] = df_daily
 
     @logged_method_call
     def filter_sum_impute_scada(self) -> None:
@@ -428,7 +482,9 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
             * MINUTES_PER_HOUR
             / (ts.offset_to_seconds(self.plant.metadata.scada.frequency) / 60)
         )
-        num_thres = self._run.correction_threshold * expected_count  # Allowable reported timesteps
+        num_thres = (
+            self._run["correction_threshold"] * expected_count
+        )  # Allowable reported timesteps
 
         self.scada_valid = pd.DataFrame()
 
@@ -512,7 +568,7 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
             df = mod_dict[t]
 
             # Add Monte-Carlo sampled uncertainty to SCADA data
-            df["energy_imputed"] = df["energy_imputed"] * self._run.scada_data_fraction
+            df["energy_imputed"] = df["energy_imputed"] * self._run["scada_data_fraction"]
 
             # Consider wind speed, wind direction, and air density as features
             mod_results[t] = functions.gam_3param(
@@ -557,7 +613,7 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
         turb_mo = turb_gross.resample("MS").sum()
 
         # Get average sum by calendar month
-        turb_mo_avg = turb_mo.groupby(turb_mo.index.month).mean()
+        turb_mo_avg = turb_mo.groupby(cast(pd.DatetimeIndex, turb_mo.index).month).mean()
 
         # Store sum of turbine gross energy
         self.plant_gross[i] = turb_mo_avg.sum(axis=1).sum(axis=0)
@@ -566,16 +622,16 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
     def plot_filtered_power_curves(
         self,
         turbines: list[str] | None = None,
-        flag_labels: tuple[str, str] = None,
+        flag_labels: tuple[str, str] | None = None,
         max_cols: int = 3,
-        xlim: tuple[float, float] = (None, None),
-        ylim: tuple[float, float] = (None, None),
+        xlim: PlotLimits = (None, None),
+        ylim: PlotLimits = (None, None),
         legend: bool = False,
         return_fig: bool = False,
-        figure_kwargs: dict | None = None,
-        legend_kwargs: dict | None = None,
-        plot_kwargs: dict | None = None,
-    ):
+        figure_kwargs: PlotKwargs | None = None,
+        legend_kwargs: PlotKwargs | None = None,
+        plot_kwargs: PlotKwargs | None = None,
+    ) -> tuple[Figure, Axes] | None:
         """Plot the raw and flagged power curve data.
 
         Args:
@@ -604,36 +660,38 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
             None | tuple[matplotlib.pyplot.Figure, matplotlib.pyplot.Axes]: If `return_fig` is True, then
                 the figure and axes objects are returned for further tinkering/saving.
         """
-        return plot.plot_power_curves(
+        # `plot_power_curves` annotates its inputs as non-optional, but accepts (and handles) None
+        result: tuple[Figure, Axes] | None = plot.plot_power_curves(
             data=self.scada_dict,
             windspeed_col="WMET_HorWdSpd",
             power_col="WTUR_W",
             flag_col="flag_final",
             turbines=turbines,
-            flag_labels=flag_labels,
+            flag_labels=cast("tuple[str, str]", flag_labels),
             max_cols=max_cols,
-            xlim=xlim,
-            ylim=ylim,
+            xlim=cast("tuple[float, float]", xlim),
+            ylim=cast("tuple[float, float]", ylim),
             legend=legend,
             return_fig=return_fig,
             figure_kwargs=figure_kwargs,
             legend_kwargs=legend_kwargs,
             plot_kwargs=plot_kwargs,
         )
+        return result
 
     def plot_daily_fitting_result(
         self,
         turbines: list[str] | None = None,
-        flag_labels: tuple[str, str, str] = ("Modeled", "Imputed", "Input"),
+        flag_labels: tuple[str, str, str] | None = ("Modeled", "Imputed", "Input"),
         max_cols: int = 3,
-        xlim: tuple[float, float] = (None, None),
-        ylim: tuple[float, float] = (None, None),
+        xlim: PlotLimits = (None, None),
+        ylim: PlotLimits = (None, None),
         legend: bool = False,
         return_fig: bool = False,
-        figure_kwargs: dict | None = None,
-        legend_kwargs: dict | None = None,
-        plot_kwargs: dict | None = None,
-    ):
+        figure_kwargs: PlotKwargs | None = None,
+        legend_kwargs: PlotKwargs | None = None,
+        plot_kwargs: PlotKwargs | None = None,
+    ) -> tuple[Figure, Axes] | None:
         """Plot the raw, imputed, and modeled power curve data.
 
         Args:
@@ -734,32 +792,28 @@ class TurbineLongTermGrossEnergy(FromDictMixin, ResetValuesMixin):
         plt.show()
         if return_fig:
             return fig, ax
+        return None
 
 
-__defaults_UQ = TurbineLongTermGrossEnergy.__attrs_attrs__.UQ.default
-__defaults_num_sim = TurbineLongTermGrossEnergy.__attrs_attrs__.num_sim.default
-__defaults_reanalysis_products = (
-    TurbineLongTermGrossEnergy.__attrs_attrs__.reanalysis_products.default
-)
-__defaults_uncertainty_scada = TurbineLongTermGrossEnergy.__attrs_attrs__.uncertainty_scada.default
-__defaults_wind_bin_threshold = (
-    TurbineLongTermGrossEnergy.__attrs_attrs__.wind_bin_threshold.default
-)
-__defaults_max_power_filter = TurbineLongTermGrossEnergy.__attrs_attrs__.max_power_filter.default
-__defaults_correction_threshold = (
-    TurbineLongTermGrossEnergy.__attrs_attrs__.correction_threshold.default
-)
+_attrs = attrs.fields(TurbineLongTermGrossEnergy)
+__defaults_UQ = cast(bool, _attrs.UQ.default)
+__defaults_num_sim = cast(int, _attrs.num_sim.default)
+__defaults_reanalysis_products: list[str] | None = _attrs.reanalysis_products.default
+__defaults_uncertainty_scada = cast(float, _attrs.uncertainty_scada.default)
+__defaults_wind_bin_threshold = cast(Threshold, _attrs.wind_bin_threshold.default)
+__defaults_max_power_filter = cast(Threshold, _attrs.max_power_filter.default)
+__defaults_correction_threshold = cast(Threshold, _attrs.correction_threshold.default)
 
 
 def create_TurbineLongTermGrossEnergy(
     project: PlantData,
     UQ: bool = __defaults_UQ,
     num_sim: int = __defaults_num_sim,
-    reanalysis_products=__defaults_reanalysis_products,
+    reanalysis_products: list[str] | None = __defaults_reanalysis_products,
     uncertainty_scada: float = __defaults_uncertainty_scada,
-    wind_bin_threshold: NDArrayFloat = __defaults_wind_bin_threshold,
-    max_power_filter: NDArrayFloat = __defaults_max_power_filter,
-    correction_threshold: NDArrayFloat = __defaults_correction_threshold,
+    wind_bin_threshold: Threshold = __defaults_wind_bin_threshold,
+    max_power_filter: Threshold = __defaults_max_power_filter,
+    correction_threshold: Threshold = __defaults_correction_threshold,
 ) -> TurbineLongTermGrossEnergy:
     return TurbineLongTermGrossEnergy(
         plant=project,

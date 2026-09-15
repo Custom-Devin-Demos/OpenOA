@@ -182,6 +182,13 @@ files = [
   "openoa/analysis/yaw_misalignment.py",
   "openoa/utils/filters.py",
   "openoa/runners/yaw_misalignment.py",
+  "openoa/analysis/turbine_long_term_gross_energy.py",
+  "openoa/runners/turbine_long_term_gross_energy.py",
+  "openoa/utils/imputing.py",
+  "openoa/utils/power_curve/__init__.py",
+  "openoa/utils/power_curve/functions.py",
+  "openoa/utils/power_curve/parametric_forms.py",
+  "openoa/utils/power_curve/parametric_optimize.py",
 ]
 
 [[tool.mypy.overrides]]
