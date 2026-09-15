@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import datetime
 from copy import deepcopy
 
@@ -15,21 +16,34 @@ import numpy.typing as npt
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from attrs import field, define
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 import openoa.utils.timeseries as ts
 from openoa.plant import PlantData
 from openoa.schema import FromDictMixin, ResetValuesMixin
-from openoa.logging import logging, logged_method_call
-from openoa.utils.plot import set_styling
+from openoa.logging import logged_method_call
+from openoa.utils.plot import KwargsDict, set_styling, set_datetime_xlim
 from openoa.analysis._analysis_validators import validate_UQ_input, validate_half_closed_0_1_right
 
 logger = logging.getLogger(__name__)
 set_styling()
 
 NDArrayFloat = npt.NDArray[np.float64]
+CorrectionThreshold = NDArrayFloat | tuple[float, float] | float
 
 MINUTES_PER_HOUR = 60
 HOURS_PER_DAY = 24
+
+DEFAULT_UQ: bool = False
+DEFAULT_NUM_SIM: int = 20000
+DEFAULT_UNCERTAINTY_METER: float = 0.005
+DEFAULT_UNCERTAINTY_SCADA: float = 0.005
+DEFAULT_UNCERTAINTY_CORRECTION_THRESHOLD: tuple[float, float] = (0.9, 0.995)
+
+
+def _copy_plant(plant: PlantData) -> PlantData:
+    return deepcopy(plant)
 
 
 @define(auto_attribs=True)
@@ -71,13 +85,20 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
             should be given, otherwise, a scalar value should be provided.
     """
 
-    plant: PlantData = field(converter=deepcopy, validator=attrs.validators.instance_of(PlantData))
-    UQ: bool = field(default=False, validator=attrs.validators.instance_of(bool))
-    num_sim: int = field(default=20000, converter=int)
-    uncertainty_meter: float = field(default=0.005, validator=validate_half_closed_0_1_right)
-    uncertainty_scada: float = field(default=0.005, validator=validate_half_closed_0_1_right)
-    uncertainty_correction_threshold: NDArrayFloat | tuple[float, float] | float = field(
-        default=(0.9, 0.995), validator=(validate_UQ_input, validate_half_closed_0_1_right)
+    plant: PlantData = field(
+        converter=_copy_plant, validator=attrs.validators.instance_of(PlantData)
+    )
+    UQ: bool = field(default=DEFAULT_UQ, validator=attrs.validators.instance_of(bool))
+    num_sim: int = field(default=DEFAULT_NUM_SIM, converter=int)
+    uncertainty_meter: float = field(
+        default=DEFAULT_UNCERTAINTY_METER, validator=validate_half_closed_0_1_right
+    )
+    uncertainty_scada: float = field(
+        default=DEFAULT_UNCERTAINTY_SCADA, validator=validate_half_closed_0_1_right
+    )
+    uncertainty_correction_threshold: CorrectionThreshold = field(
+        default=DEFAULT_UNCERTAINTY_CORRECTION_THRESHOLD,
+        validator=(validate_UQ_input, validate_half_closed_0_1_right),
     )
 
     # Internally created attributes need to be given a type before usage
@@ -89,8 +110,8 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
     scada_full_count: pd.DataFrame = field(init=False)
     meter_daily: pd.DataFrame = field(init=False)
     combined_energy: pd.DataFrame = field(init=False)
-    total_turbine_energy: pd.DataFrame = field(init=False)
-    total_meter_energy: pd.DataFrame = field(init=False)
+    total_turbine_energy: float = field(init=False)
+    total_meter_energy: float = field(init=False)
     run_parameters: list[str] = field(
         init=False,
         default=[
@@ -103,11 +124,13 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
     )
 
     @logged_method_call
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         """
         Initialize logging and post-initialization setup steps.
         """
-        if {"ElectricalLosses", "all"}.intersection(self.plant.analysis_type) == set():
+        if self.plant.analysis_type is None:
+            self.plant.analysis_type = ["ElectricalLosses"]
+        elif {"ElectricalLosses", "all"}.isdisjoint(self.plant.analysis_type):
             self.plant.analysis_type.append("ElectricalLosses")
 
         # Ensure the data are up to spec before continuing with initialization
@@ -132,10 +155,10 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
     def run(
         self,
         num_sim: int | None = None,
-        uncertainty_meter: NDArrayFloat | float = None,
-        uncertainty_scada: NDArrayFloat | float = None,
-        uncertainty_correction_threshold: NDArrayFloat | tuple[float, float] | float = None,
-    ):
+        uncertainty_meter: float | None = None,
+        uncertainty_scada: float | None = None,
+        uncertainty_correction_threshold: CorrectionThreshold | None = None,
+    ) -> None:
         """
         Run the electrical losses calculation.
 
@@ -153,7 +176,7 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
                 then a 2-element tuple containing an upper and lower bound for a randomly selected value
                 should be given, otherwise, a scalar value should be provided.
         """
-        initial_parameters = {}
+        initial_parameters: dict[str, int | CorrectionThreshold] = {}
         if num_sim is not None:
             if self.UQ:
                 initial_parameters["num_sim"] = self.num_sim
@@ -182,49 +205,61 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
         self.set_values(initial_parameters)
 
     @logged_method_call
-    def setup_inputs(self):
+    def setup_inputs(self) -> None:
         """
         Create and populate the data frame defining the simulation parameters.
         This data frame is stored as self.inputs.
         """
         if self.UQ:
-            n_decimal = max(
-                len(str(el).split(".")[1]) for el in self.uncertainty_correction_threshold
-            )
-            integer_multiplier = 10**n_decimal
-            inputs = {
-                "meter_data_fraction": np.random.normal(1, self.uncertainty_meter, self.num_sim),
-                "scada_data_fraction": np.random.normal(1, self.uncertainty_scada, self.num_sim),
-                "correction_threshold": np.random.randint(
-                    self.uncertainty_correction_threshold[0] * integer_multiplier,
-                    self.uncertainty_correction_threshold[1] * integer_multiplier,
-                    self.num_sim,
+            threshold = self.uncertainty_correction_threshold
+            if isinstance(threshold, float):
+                raise ValueError(
+                    "When UQ is True, uncertainty_correction_threshold must be a tuple of length 2."
                 )
-                / integer_multiplier,
-            }
-            self.inputs = pd.DataFrame(inputs)
+            n_decimal = max(len(str(el).split(".")[1]) for el in threshold)
+            integer_multiplier = 10**n_decimal
+            self.inputs = pd.DataFrame(
+                {
+                    "meter_data_fraction": np.random.normal(
+                        1, self.uncertainty_meter, self.num_sim
+                    ),
+                    "scada_data_fraction": np.random.normal(
+                        1, self.uncertainty_scada, self.num_sim
+                    ),
+                    "correction_threshold": np.random.randint(
+                        threshold[0] * integer_multiplier,
+                        threshold[1] * integer_multiplier,
+                        self.num_sim,
+                    )
+                    / integer_multiplier,
+                }
+            )
         else:
-            inputs = {
-                "meter_data_fraction": 1,
-                "scada_data_fraction": 1,
-                "correction_threshold": self.uncertainty_correction_threshold,
-            }
-            self.inputs = pd.DataFrame(inputs, index=[0])
+            self.inputs = pd.DataFrame(
+                {
+                    "meter_data_fraction": 1,
+                    "scada_data_fraction": 1,
+                    "correction_threshold": self.uncertainty_correction_threshold,
+                },
+                index=[0],
+            )
 
         self.electrical_losses = np.empty([self.num_sim, 1])
 
     @logged_method_call
-    def process_scada(self):
+    def process_scada(self) -> None:
         """
         Calculate daily sum of turbine energy only for days when all turbines are reporting
         at all time steps.
         """
         logger.info("Processing SCADA data")
 
+        if self.plant.scada is None:
+            raise ValueError("`plant.scada` is required for the electrical losses analysis.")
         scada_df = self.plant.scada.copy()
 
         # Sum up SCADA data power and energy and count number of entries
-        ix_time = self.plant.scada.index.get_level_values("time")
+        ix_time = scada_df.index.get_level_values("time")
         self.scada_sum = scada_df.groupby(ix_time)[["WTUR_SupWh"]].sum()
         self.scada_sum["count"] = scada_df.groupby(ix_time)[["WTUR_SupWh"]].count()
 
@@ -250,12 +285,14 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
         self.scada_full_count = self.scada_daily.loc[self.scada_daily["count"] == expected_count]
 
     @logged_method_call
-    def process_meter(self):
+    def process_meter(self) -> None:
         """
         Calculate daily sum of meter energy only for days when meter data is reporting at all time steps.
         """
         logger.info("Processing meter data")
 
+        if self.plant.meter is None:
+            raise ValueError("`plant.meter` is required for the electrical losses analysis.")
         meter_df = self.plant.meter.copy()
 
         # Sum up meter data to daily
@@ -273,12 +310,15 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
         self.meter_daily = self.meter_daily[self.meter_daily["count"] == expected_count]
 
     @logged_method_call
-    def calculate_electrical_losses(self):
+    def calculate_electrical_losses(self) -> None:
         """
         Apply Monte Carlo approach to calculate electrical losses and their uncertainty based on the
         difference in the sum of turbine and metered energy over the compiled days.
         """
         logger.info("Calculating electrical losses")
+
+        if self.plant.meter is None:
+            raise ValueError("`plant.meter` is required for the electrical losses analysis.")
 
         # Loop through number of simulations, calculate losses each time, store results
         for n in tqdm(np.arange(self.num_sim)):
@@ -293,10 +333,10 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
                 # Determine availability for each month represented
                 scada_monthly["count"] = self.scada_sum.resample("MS")["count"].sum()
                 scada_monthly["expected_count_monthly"] = (
-                    scada_monthly.index.daysinmonth
+                    pd.DatetimeIndex(scada_monthly.index).daysinmonth
                     * HOURS_PER_DAY
                     * MINUTES_PER_HOUR
-                    / (pd.to_timedelta(self.plant.scada.frequency).total_seconds() / 60)
+                    / (ts.offset_to_seconds(self.plant.metadata.scada.frequency) / 60)
                     * self.plant.n_turbines
                 )
                 scada_monthly["percent"] = (
@@ -333,10 +373,10 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
         xlim: tuple[datetime.datetime | None, datetime.datetime | None] = (None, None),
         ylim: tuple[float | None, float | None] = (None, None),
         return_fig: bool = False,
-        figure_kwargs: dict | None = None,
-        legend_kwargs: dict | None = None,
-        plot_kwargs: dict | None = None,
-    ) -> None | tuple[plt.Figure, plt.Axes]:
+        figure_kwargs: KwargsDict | None = None,
+        legend_kwargs: KwargsDict | None = None,
+        plot_kwargs: KwargsDict | None = None,
+    ) -> None | tuple[Figure, Axes]:
         """Plots the monthly timeseries of electrical losses as a percent.
 
         Args:
@@ -381,8 +421,8 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
             **plot_kwargs,
         )
 
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
+        set_datetime_xlim(ax, xlim)
+        ax.set_ylim(*ylim)
 
         ax.legend(**legend_kwargs)
         ax.set_xlabel("Period of Record")
@@ -392,26 +432,18 @@ class ElectricalLosses(FromDictMixin, ResetValuesMixin):
         plt.show()
         if return_fig:
             return fig, ax
-
-
-__defaults_UQ = ElectricalLosses.__attrs_attrs__.UQ.default
-__defaults_num_sim = ElectricalLosses.__attrs_attrs__.num_sim.default
-__defaults_uncertainty_correction_threshold = (
-    ElectricalLosses.__attrs_attrs__.uncertainty_correction_threshold.default
-)
-__defaults_uncertainty_meter = ElectricalLosses.__attrs_attrs__.uncertainty_meter.default
-__defaults_uncertainty_scada = ElectricalLosses.__attrs_attrs__.uncertainty_scada.default
+        return None
 
 
 def create_ElectricalLosses(
     project: PlantData,
-    UQ: bool = __defaults_UQ,
-    num_sim: int = __defaults_num_sim,
-    uncertainty_correction_threshold: (
-        NDArrayFloat | tuple[float, float] | float
-    ) = __defaults_uncertainty_correction_threshold,
-    uncertainty_meter: NDArrayFloat | tuple[float, float] | float = __defaults_uncertainty_meter,
-    uncertainty_scada: NDArrayFloat | tuple[float, float] | float = __defaults_uncertainty_scada,
+    UQ: bool = DEFAULT_UQ,
+    num_sim: int = DEFAULT_NUM_SIM,
+    uncertainty_correction_threshold: CorrectionThreshold = (
+        DEFAULT_UNCERTAINTY_CORRECTION_THRESHOLD
+    ),
+    uncertainty_meter: float = DEFAULT_UNCERTAINTY_METER,
+    uncertainty_scada: float = DEFAULT_UNCERTAINTY_SCADA,
 ) -> ElectricalLosses:
     return ElectricalLosses(
         plant=project,

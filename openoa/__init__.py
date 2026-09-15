@@ -7,7 +7,7 @@ When bumping version, please be sure to also update parameters in sphinx/conf.py
 from openoa.plant import PlantData
 
 
-def __attach_methods():
+def __attach_methods() -> None:
     from openoa.analysis.aep import create_MonteCarloAEP
     from openoa.analysis.wake_losses import create_WakeLosses
     from openoa.analysis.eya_gap_analysis import create_EYAGapAnalysis
