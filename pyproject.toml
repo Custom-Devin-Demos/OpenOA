@@ -164,6 +164,9 @@ files = [
   "openoa/schema/schema.py",
   "openoa/analysis/__init__.py",
   "openoa/analysis/_analysis_validators.py",
+  "openoa/analysis/yaw_misalignment.py",
+  "openoa/utils/filters.py",
+  "openoa/runners/yaw_misalignment.py",
 ]
 
 [[tool.mypy.overrides]]
