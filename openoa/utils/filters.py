@@ -5,9 +5,12 @@ intended for application in wind plant operational energy analysis, particularly
 
 from __future__ import annotations
 
+from typing import Any, TypeVar, Callable, Hashable, cast
+
 import numpy as np
 import scipy as sp
 import pandas as pd
+import numpy.typing as npt
 from sklearn.cluster import KMeans
 
 from openoa.utils._converters import (
@@ -16,6 +19,52 @@ from openoa.utils._converters import (
     dataframe_method,
     convert_args_to_lists,
 )
+
+NDArrayFloat = npt.NDArray[np.float64]
+
+# `Callable[..., Any]` is the standard bound for a decorator that preserves the wrapped signature
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _series_method(data_cols: list[str]) -> Callable[[F], F]:
+    """Typed wrapper around :py:func:`series_method`, which preserves the decorated signature."""
+    return cast(Callable[[F], F], series_method(data_cols=data_cols))
+
+
+def _dataframe_method(data_cols: list[str]) -> Callable[[F], F]:
+    """Typed wrapper around :py:func:`dataframe_method`, which preserves the decorated signature."""
+    return cast(Callable[[F], F], dataframe_method(data_cols=data_cols))
+
+
+def _ensure_series(value: pd.Series | str | None, name: str) -> pd.Series:
+    """Checks that a column argument has been converted to a pandas ``Series`` by the
+    :py:func:`series_method` decorator, and returns it.
+    """
+    if not isinstance(value, pd.Series):
+        raise TypeError(f"The input to `{name}` must be a pandas Series or a column of `data`.")
+    return value
+
+
+def _column_name(value: pd.Series | str) -> Hashable:
+    """Returns the column name for a column argument that is either a name or a pandas ``Series``."""
+    return value.name if isinstance(value, pd.Series) else value
+
+
+def _prepare_columns(
+    data: pd.DataFrame | pd.Series, col: list[str] | None
+) -> tuple[pd.DataFrame, list[Hashable], bool]:
+    """Standardizes the ``data`` and ``col`` inputs to a ``DataFrame`` and list of columns.
+
+    Returns:
+        tuple[pandas.DataFrame, list[Hashable], bool]: The data as a ``DataFrame``, the columns to
+            operate on, and whether or not a ``Series`` was originally passed.
+    """
+    if isinstance(data, pd.Series):
+        df, names = series_to_df(data)
+        return df, list(names), True
+    cols: list[Hashable] = []
+    cols.extend(data.columns.tolist() if col is None else col)
+    return data, cols, False
 
 
 def range_flag(
@@ -47,21 +96,18 @@ def range_flag(
             boolean entries.
     """
     # Prepare the inputs to be standardized for use with DataFrames
-    if to_series := isinstance(data, pd.Series):
-        data, col = series_to_df(data)
-    if col is None:
-        col = data.columns.tolist()
+    df, cols, to_series = _prepare_columns(data, col)
 
-    upper, lower = convert_args_to_lists(len(col), upper, lower)
-    if len(col) != len(lower) != len(upper):
+    upper_list, lower_list = convert_args_to_lists(len(cols), upper, lower)
+    if len(cols) != len(lower_list) != len(upper_list):
         raise ValueError("The inputs to `col`, `above`, and `below` must be the same length.")
 
     # Only flag the desired columns
-    subset = data.loc[:, col].copy()
-    flag = ~(subset.ge(lower) & subset.le(upper))
+    subset = df[cols].copy()
+    flag = ~(subset.ge(lower_list) & subset.le(upper_list))
 
     # Return back a pd.Series if one was provided, else a pd.DataFrame
-    return flag[col[0]] if to_series else flag
+    return flag[cols[0]] if to_series else flag
 
 
 def unresponsive_flag(
@@ -87,20 +133,17 @@ def unresponsive_flag(
             boolean entries.
     """
     # Prepare the inputs to be standardized for use with DataFrames
-    if to_series := isinstance(data, pd.Series):
-        data, col = series_to_df(data)
-    if col is None:
-        col = data.columns.tolist()
+    df, cols, to_series = _prepare_columns(data, col)
     if not isinstance(threshold, int):
         raise TypeError("The input to `threshold` must be an integer.")
 
     # Get boolean value of the difference in successive time steps is not equal to zero, and take the
     # rolling sum of the boolean diff column in period lengths defined by threshold
-    subset = data.loc[:, col].copy()
-    flag = subset.diff(axis=0).ne(0).rolling(threshold - 1).sum()
+    subset = df[cols].copy()
+    rolling_sum = subset.diff(axis=0).ne(0).rolling(threshold - 1).sum()
 
     # Create boolean series that is True if rolling sum is zero
-    flag = flag == 0
+    flag: pd.DataFrame = rolling_sum == 0
 
     # Need to flag preceding `threshold` values as well
     flag = flag | np.any(
@@ -108,7 +151,7 @@ def unresponsive_flag(
     )
 
     # Return back a pd.Series if one was provided, else a pd.DataFrame
-    return flag[col[0]] if to_series else flag
+    return flag[cols[0]] if to_series else flag
 
 
 def std_range_flag(
@@ -138,33 +181,30 @@ def std_range_flag(
             boolean entries.
     """
     # Prepare the inputs to be standardized for use with DataFrames
-    if to_series := isinstance(data, pd.Series):
-        data, col = series_to_df(data)
-    if col is None:
-        col = data.columns.tolist()
+    df, cols, to_series = _prepare_columns(data, col)
 
-    threshold, *_ = convert_args_to_lists(len(col), threshold)
-    if len(col) != len(threshold):
+    threshold_list, *_ = convert_args_to_lists(len(cols), threshold)
+    if len(cols) != len(threshold_list):
         raise ValueError("The inputs to `col` and `threshold` must be the same length.")
 
-    subset = data.loc[:, col].copy()
-    data_mean = np.nanmean(subset.values, axis=0)
-    data_std = np.nanstd(subset.values, ddof=1, axis=0) * np.array(threshold)
+    subset = df[cols].copy()
+    data_mean = np.nanmean(subset.to_numpy(), axis=0)
+    data_std = np.nanstd(subset.to_numpy(), ddof=1, axis=0) * np.array(threshold_list)
     flag = subset.le(data_mean - data_std) | subset.ge(data_mean + data_std)
 
     # Return back a pd.Series if one was provided, else a pd.DataFrame
-    return flag[col[0]] if to_series else flag
+    return flag[cols[0]] if to_series else flag
 
 
-@series_method(data_cols=["window_col", "value_col"])
+@_series_method(data_cols=["window_col", "value_col"])
 def window_range_flag(
-    window_col: str | pd.Series = None,
+    window_col: str | pd.Series | None = None,
     window_start: float = -np.inf,
     window_end: float = np.inf,
-    value_col: str | pd.Series = None,
+    value_col: str | pd.Series | None = None,
     value_min: float = -np.inf,
     value_max: float = np.inf,
-    data: pd.DataFrame = None,
+    data: pd.DataFrame | None = None,
 ) -> pd.Series:
     """Flag time stamps for which measurement in `window_col` are within the range: [`window_start`, `window_end`], and
     the measurements in `value_col` are outside of the range [`value_min`, `value_max`].
@@ -184,23 +224,25 @@ def window_range_flag(
     Returns:
         :obj:`pandas.Series`: Series with boolean entries.
     """
-    flag = window_col.between(window_start, window_end) & ~value_col.between(value_min, value_max)
+    window = _ensure_series(window_col, "window_col")
+    value = _ensure_series(value_col, "value_col")
+    flag = window.between(window_start, window_end) & ~value.between(value_min, value_max)
     return flag
 
 
-@series_method(data_cols=["bin_col", "value_col"])
+@_series_method(data_cols=["bin_col", "value_col"])
 def bin_filter(
     bin_col: pd.Series | str,
     value_col: pd.Series | str,
     bin_width: float,
     threshold: float = 2,
     center_type: str = "mean",
-    bin_min: float = None,
-    bin_max: float = None,
+    bin_min: float | None = None,
+    bin_max: float | None = None,
     threshold_type: str = "std",
     direction: str = "all",
-    data: pd.DataFrame = None,
-):
+    data: pd.DataFrame | None = None,
+) -> pd.Series:
     """Flag time stamps for which data in `value_col` when binned by data in `bin_col` into bins of
     width `bin_width` are outside the `threhsold` bin. The `center_type` of each bin can be either the
     median or mean, and flagging can be applied directionally (i.e. above or below the center, or both)
@@ -231,11 +273,15 @@ def bin_filter(
             "Incorrect `direction` specified; must be one of 'all', 'above', or 'below'."
         )
 
+    bins = _ensure_series(bin_col, "bin_col")
+    values = _ensure_series(value_col, "value_col")
+    bin_array = bins.to_numpy()
+
     # Set bin min and max values if not passed to function
     if bin_min is None:
-        bin_min = np.min(bin_col.values)
+        bin_min = float(np.min(bin_array))
     if bin_max is None:
-        bin_max = np.max(bin_col.values)
+        bin_max = float(np.max(bin_array))
 
     # Define bin edges
     bin_edges = np.arange(bin_min, bin_max, bin_width)
@@ -244,13 +290,15 @@ def bin_filter(
     bin_edges = np.unique(np.clip(np.append(bin_edges, bin_max), bin_min, bin_max))
 
     # Bin the data and recreate the comparison data as a multi-column data frame
-    which_bin_col = np.digitize(bin_col, bin_edges, right=True)
+    which_bin_col = np.digitize(bin_array, bin_edges, right=True)
 
     # Create the flag values as a matrix with each column being the timestamp's binned value,
     # e.g., all columns values are NaN if the data point is not in that bin
     flag_vals = (
-        value_col.to_frame().set_index(pd.Series(which_bin_col, name="bin"), append=True).unstack()
+        values.to_frame().set_index(pd.Series(which_bin_col, name="bin"), append=True).unstack()
     )
+    if not isinstance(flag_vals, pd.DataFrame):
+        raise TypeError("The binned values could not be converted to a DataFrame.")
     drop = [i for i, el in enumerate(flag_vals.columns.names) if el != "bin"]
     flag_vals.columns = flag_vals.columns.droplevel(drop).rename(None)
 
@@ -258,23 +306,25 @@ def bin_filter(
     flag_df = pd.DataFrame(np.zeros_like(flag_vals, dtype=bool), index=flag_vals.index)
 
     # Get center of binned data
+    flag_array = flag_vals.to_numpy()
     if center_type == "median":
-        center = np.nanmedian(flag_vals.values, axis=0)
+        center_vals = np.nanmedian(flag_array, axis=0)
     else:
-        center = np.nanmean(flag_vals.values, axis=0)
+        center_vals = np.nanmean(flag_array, axis=0)
     center = pd.DataFrame(
-        np.full(flag_vals.shape, center),
+        np.full(flag_vals.shape, center_vals),
         index=flag_vals.index,
         columns=flag_vals.columns,
     )
 
     # Define threshold of data flag
+    deviation: NDArrayFloat | float
     if threshold_type == "std":
-        deviation = np.nanstd(flag_vals.values, ddof=1, axis=0) * threshold
+        deviation = np.nanstd(flag_array, ddof=1, axis=0) * threshold
     elif threshold_type == "scalar":
         deviation = threshold
     else:  # median absolute deviation (mad)
-        deviation = np.nanmedian(np.abs(flag_vals.values - center.values), axis=0) * threshold
+        deviation = np.nanmedian(np.abs(flag_array - center.to_numpy()), axis=0) * threshold
 
     # Perform flagging depending on specfied direction
     if direction in ("above", "all"):
@@ -284,17 +334,17 @@ def bin_filter(
 
     # Get all instances where the value is True, and reset any values outside the bin limits
     flag = pd.Series(np.nanmax(flag_df, axis=1), index=flag_df.index, dtype="bool")
-    flag.loc[(bin_col <= bin_min) | (bin_col > bin_max)] = False
+    flag.loc[(bins <= bin_min) | (bins > bin_max)] = False
     return flag
 
 
-@dataframe_method(data_cols=["data_col1", "data_col2"])
+@_dataframe_method(data_cols=["data_col1", "data_col2"])
 def cluster_mahalanobis_2d(
     data_col1: pd.Series | str,
     data_col2: pd.Series | str,
     n_clusters: int = 13,
     dist_thresh: float = 3.0,
-    data: pd.DataFrame = None,
+    data: pd.DataFrame | None = None,
 ) -> pd.Series:
     """K-means clustering of  data into `n_cluster` clusters; Mahalanobis distance evaluated for each cluster and
     points with distances outside of `dist_thresh` are flagged; distinguishes between asset IDs.
@@ -312,7 +362,9 @@ def cluster_mahalanobis_2d(
     Returns:
         :obj:`pandas.Series(bool)`: Array-like object with boolean entries.
     """
-    data = data.loc[:, [data_col1, data_col2]].copy()
+    if data is None:
+        raise ValueError("No input provided to `data`; cannot perform the cluster analysis.")
+    data = data.loc[:, [_column_name(data_col1), _column_name(data_col2)]].copy()
     kmeans = KMeans(n_clusters=n_clusters).fit(data)
 
     # Define empty flag of 'False' values with indices matching value_col
