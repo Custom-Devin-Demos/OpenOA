@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import attrs
 import numpy as np
 
 
-def validate_UQ_input(cls, attribute: attrs.Attribute, value: float | tuple) -> None:
+def validate_UQ_input(
+    cls: Any, attribute: attrs.Attribute[Any], value: float | tuple[float, float]
+) -> None:
     """Validates values that should be a float when :py:attr:`UQ` is False, or a 2-tuple of floats
     when :py:attr:`UQ` is False.
 
@@ -42,7 +46,9 @@ def validate_UQ_input(cls, attribute: attrs.Attribute, value: float | tuple) -> 
             )
 
 
-def validate_half_closed_0_1_right(cls, attribute: attrs.Attribute, value: float | tuple) -> None:
+def validate_half_closed_0_1_right(
+    cls: Any, attribute: attrs.Attribute[Any], value: float | tuple[float, ...]
+) -> None:
     """Validates that the value, or tuple of values is in the half-closed range of (0, 1].
 
     Args:
@@ -66,7 +72,9 @@ def validate_half_closed_0_1_right(cls, attribute: attrs.Attribute, value: float
             )
 
 
-def validate_half_closed_0_1_left(cls, attribute: attrs.Attribute, value: float | tuple) -> None:
+def validate_half_closed_0_1_left(
+    cls: Any, attribute: attrs.Attribute[Any], value: float | tuple[float, ...]
+) -> None:
     """Validates that the value, or tuple of values is in the half-closed range of [0, 1).
 
     Args:
@@ -91,7 +99,7 @@ def validate_half_closed_0_1_left(cls, attribute: attrs.Attribute, value: float 
 
 
 def validate_reanalysis_selections(
-    cls, attribute: attrs.Attribute, value: list[str] | None
+    cls: Any, attribute: attrs.Attribute[Any], value: list[str | None] | None
 ) -> None:
     """Validates the inputs to ``reanalysis_products``, and if ``None`` is proviced, the associated
     ``PlantData`` object's available reanalyis products are provided.
@@ -106,7 +114,7 @@ def validate_reanalysis_selections(
             object is provided.
     """
     valid = [*cls.plant.reanalysis]
-    if None in value or value is None:
+    if value is None or None in value:
         object.__setattr__(cls, "reanalysis_products", valid)
         return
     if "product" in value:
@@ -114,7 +122,7 @@ def validate_reanalysis_selections(
             "Neither `plant.reanalysis` nor `reanalysis_products` can have 'product',"
             " as an input. 'product' is the empty default value and is reserved."
         )
-    invalid = list(set(value).difference(valid))
+    invalid = [v for v in value if v not in valid]
     if invalid:
         raise ValueError(
             f"The following input to `reanalysis_products`: {invalid} are not contained"

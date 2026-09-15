@@ -1,0 +1,17 @@
+# Example configuration for `python -m openoa.cli run turbine_long_term_gross_energy`.
+# Mirrors examples/03_turbine_ideal_energy.ipynb (UQ case) with a small `num_sim` for speed.
+seed: 42
+plant:
+  loader: examples.project_ENGIE:prepare
+  loader_kwargs:
+    path: ../data/la_haute_borne  # relative to this file
+    use_cleansed: false
+  analysis_type: TurbineLongTermGrossEnergy
+analysis:
+  UQ: true
+  num_sim: 10
+  reanalysis_products: [era5, merra2]
+  uncertainty_scada: 0.005
+  wind_bin_threshold: [1.0, 3.0]
+  max_power_filter: [0.8, 0.9]
+  correction_threshold: [0.85, 0.95]

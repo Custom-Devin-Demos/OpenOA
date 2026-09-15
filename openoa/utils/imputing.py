@@ -2,7 +2,10 @@
 This module provides methods for filling in null data with interpolated (imputed) values.
 """
 
+from __future__ import annotations
+
 from copy import deepcopy
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -23,7 +26,8 @@ def asset_correlation_matrix(data: pd.DataFrame, value_col: str) -> pd.DataFrame
     Returns:
         :obj:`pandas.DataFrame`: Correlation matrix with <id_col> as index and column names
     """
-    corr_df = data.loc[:, [value_col]].unstack().corr(min_periods=2)
+    unstacked = cast(pd.DataFrame, data.loc[:, [value_col]].unstack())
+    corr_df = unstacked.corr(min_periods=2)
     corr_df = corr_df.droplevel(0).droplevel(0, axis=1)  # drop the added axes
     corr_df.index = corr_df.index.set_names(None)
     corr_df.columns = corr_df.index.set_names(None)
@@ -34,13 +38,13 @@ def asset_correlation_matrix(data: pd.DataFrame, value_col: str) -> pd.DataFrame
 def impute_data(
     target_col: str,
     reference_col: str,
-    target_data: pd.DataFrame = None,
-    reference_data: pd.DataFrame = None,
-    align_col: str = None,
+    target_data: pd.DataFrame | None = None,
+    reference_data: pd.DataFrame | None = None,
+    align_col: str | None = None,
     method: str = "linear",
     degree: int = 1,
-    data: pd.DataFrame = None,
-) -> pd.Series:  # ADD LINEAR FUNCTIONALITY AS DEFAULT, expection otherwise
+    data: pd.DataFrame | None = None,
+) -> pd.Series[float]:  # ADD LINEAR FUNCTIONALITY AS DEFAULT, expection otherwise
     """Replaces NaN data in a target Pandas series with imputed data from a reference Panda series based on a linear
     regression relationship.
 
@@ -67,7 +71,9 @@ def impute_data(
     """
     final_col_name = deepcopy(target_col)
     if data is None:
-        if any(not isinstance(x, pd.DataFrame) for x in (target_data, reference_data)):
+        if not isinstance(target_data, pd.DataFrame) or not isinstance(
+            reference_data, pd.DataFrame
+        ):
             raise TypeError(
                 "If `data` is not provided, then `ref_data` and `target_data` must be provided as pandas DataFrames."
             )
@@ -139,7 +145,7 @@ def impute_all_assets_by_correlation(
     r2_threshold: float = 0.7,
     method: str = "linear",
     degree: int = 1,
-):
+) -> pd.Series[float]:
     """Imputes NaN data in a Pandas data frame to the best extent possible by considering available data
     across different assets in the data frame. Highest correlated assets are prioritized in the imputation process.
 
@@ -188,8 +194,8 @@ def impute_all_assets_by_correlation(
 
         # Get the correlation-based neareast neighbor and data
         id_sort_neighbor = 0
-        id_neighbor = sort_df.loc[target_id, id_sort_neighbor]
-        r2_neighbor = corr_df.loc[target_id, id_neighbor]
+        id_neighbor = cast(str, sort_df.loc[target_id, id_sort_neighbor])
+        r2_neighbor = cast(float, corr_df.loc[target_id, id_neighbor])
 
         # If the R2 value is too low, then move on to the next asset
         if r2_neighbor <= r2_threshold:
@@ -221,8 +227,8 @@ def impute_all_assets_by_correlation(
             ix_nan = impute_df.loc[ix_target, impute_col].isnull()
             num_neighbors -= 1
             id_sort_neighbor += 1
-            id_neighbor = sort_df.loc[target_id, id_sort_neighbor]
-            r2_neighbor = corr_df.loc[target_id, id_neighbor]
+            id_neighbor = cast(str, sort_df.loc[target_id, id_sort_neighbor])
+            r2_neighbor = cast(float, corr_df.loc[target_id, id_neighbor])
 
     # Return the results with the impute_col renamed with a leading "imputed_" for clarity
     # return impute_df.rename(columns={c: f"imputed_{c}" for c in impute_df.columns})

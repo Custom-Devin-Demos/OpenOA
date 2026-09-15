@@ -34,7 +34,7 @@ meta_class_map = {
 }
 
 
-def _attrs_meta_filter(inst: Attribute, value: Any) -> bool:
+def _attrs_meta_filter(inst: Attribute[Any], value: Any) -> bool:
     """Filters out any unnecessary components of the metadata classes.
 
     Args:
@@ -51,12 +51,13 @@ def _attrs_meta_filter(inst: Attribute, value: Any) -> bool:
     return True
 
 
-def _attrs_meta_serializer(inst: type, field: Attribute, value: Any) -> Any:
+def _attrs_meta_serializer(inst: type, field: Attribute[Any] | None, value: Any) -> Any:
     """Custom serialization for attrs dataclass fields.
 
     Args:
         inst (type): The class object.
-        field (Attribute): The ``attrs.field`` information.
+        field (Attribute | None): The ``attrs.field`` information. ``attrs.asdict`` passes
+            ``None`` for values nested inside containers.
         value (Any): The actual values in the :py:attr:`field`.
 
     Returns:
@@ -70,13 +71,13 @@ def _attrs_meta_serializer(inst: type, field: Attribute, value: Any) -> Any:
     return value
 
 
-def create_schema() -> dict:
+def create_schema() -> dict[str, dict[str, Any]]:
     """Creates a dictionary of the metadata input requirements.
 
     Returns:
         dict: The compiled metadata dictionary specifying the required data definitions.
     """
-    schema = {name: {} for name in meta_class_map}
+    schema: dict[str, dict[str, Any]] = {name: {} for name in meta_class_map}
     for name, meta in meta_class_map.items():
         meta_dict = asdict(
             meta(), filter=_attrs_meta_filter, value_serializer=_attrs_meta_serializer
@@ -95,7 +96,7 @@ def create_schema() -> dict:
     return schema
 
 
-def create_analysis_schema(analysis_types: str | list[str]) -> dict:
+def create_analysis_schema(analysis_types: str | list[str]) -> dict[str, dict[str, Any]]:
     """Creates a dictionary of the metadata input requirements.
 
     Returns:

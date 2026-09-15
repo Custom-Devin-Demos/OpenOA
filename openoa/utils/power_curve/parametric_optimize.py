@@ -8,27 +8,46 @@ cost function
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Protocol, TypeAlias
 
 import numpy as np
 import pandas as pd
+import numpy.typing as npt
+
+NDArrayFloat = npt.NDArray[np.float64]
+ArrayInput: TypeAlias = "NDArrayFloat | pd.Series[float]"
+Bounds: TypeAlias = tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]
+CurveFunction: TypeAlias = Callable[..., NDArrayFloat]
+CostFunction: TypeAlias = Callable[[ArrayInput, ArrayInput], float]
+PowerCurve: TypeAlias = Callable[[ArrayInput], NDArrayFloat]
+
+
+class OptimizeResult(Protocol):
+    """The subset of :py:class:`scipy.optimize.OptimizeResult` used by the curve fit."""
+
+    x: NDArrayFloat
+
+
+OptimizationAlgorithm: TypeAlias = Callable[
+    [Callable[[NDArrayFloat], float], Bounds], OptimizeResult
+]
 
 
 def fit_parametric_power_curve(
-    x: np.ndarray | pd.Series,
-    y: np.ndarray | pd.Series,
-    curve: Callable,
-    optimization_algorithm: Callable,
-    cost_function: Callable,
-    bounds: tuple[
-        tuple[float, float],
-        tuple[float, float],
-        tuple[float, float],
-        tuple[float, float],
-        tuple[float, float],
-    ],
+    x: ArrayInput,
+    y: ArrayInput,
+    curve: CurveFunction,
+    optimization_algorithm: OptimizationAlgorithm,
+    cost_function: CostFunction,
+    bounds: Bounds,
     return_params: bool = False,
-):
+) -> PowerCurve | tuple[Callable[[ArrayInput], PowerCurve], OptimizeResult]:
     """
     Fit curve to filtered power-windspeed data.
 
@@ -49,14 +68,14 @@ def fit_parametric_power_curve(
     """
 
     # Build opt function as a closure on "x" and "y"
-    def f(opt_params):
+    def f(opt_params: NDArrayFloat) -> float:
         return cost_function(curve(x, *opt_params), y)
 
     # Run the optimization algorithm
     fit = optimization_algorithm(f, bounds)
 
     # Create closure of curve function with fit params
-    def fit_curve(x_2):
+    def fit_curve(x_2: ArrayInput) -> NDArrayFloat:
         return curve(x_2, *fit.x)
 
     # Return values based on flag
@@ -71,7 +90,7 @@ Cost Functions
 """
 
 
-def least_squares(x: np.ndarray | pd.Series, y: np.ndarray | pd.Series):
+def least_squares(x: ArrayInput, y: ArrayInput) -> float:
     """Least Squares loss function
 
     Args:
@@ -81,4 +100,5 @@ def least_squares(x: np.ndarray | pd.Series, y: np.ndarray | pd.Series):
     Returns:
         The least square of x and y.
     """
-    return np.sum((x - y) ** 2)
+    result: float = np.sum((x - y) ** 2)
+    return result
