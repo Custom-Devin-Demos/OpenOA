@@ -171,6 +171,11 @@ files = [
   "openoa/plant.py",
   "openoa/schema/metadata.py",
   "openoa/runners/eya_gap_analysis.py",
+  "openoa/analysis/aep.py",
+  "openoa/utils/timeseries.py",
+  "openoa/utils/unit_conversion.py",
+  "openoa/utils/machine_learning_setup.py",
+  "openoa/runners/aep.py",
 ]
 
 [[tool.mypy.overrides]]
